@@ -14,7 +14,7 @@ dependencies:
   esp_lcd_co5300: "*"
   waveshare/esp_lcd_touch_cst9217: "*"
   espressif/esp_lvgl_adapter:
-    version: "^0.1.*"
+    version: "0.4.2"
     public: true
 
   esp_codec_dev:
@@ -25,3 +25,5 @@ dependencies:
   esp_io_expander_tca9554:
     version: "^2"
     public: true
+  espressif/usb:
+    version: "^1.0.0"

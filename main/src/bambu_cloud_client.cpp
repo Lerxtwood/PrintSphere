@@ -2097,6 +2097,8 @@ void BambuCloudClient::publish_combined_snapshot() {
 
   current.configured = rest.configured || live.configured;
   current.connected = live.connected;
+  current.printer_online = (rest.session_ready && rest.printer_online) ||
+                           live.connected || live_has_recent_data;
   current.session_connected =
       (rest.configured && rest.session_ready && !rest.verification_required && !rest.tfa_required) ||
       current.connected || mqtt_connected_.load() || mqtt_subscription_acknowledged_.load();
@@ -2310,7 +2312,6 @@ void BambuCloudClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
 
   switch (static_cast<esp_mqtt_event_id_t>(event->event_id)) {
     case MQTT_EVENT_CONNECTED: {
-      cloud_mqtt_lease_.reset();
       mqtt_connected_ = true;
       mqtt_subscription_acknowledged_ = false;
       received_live_payload_ = false;
@@ -2367,7 +2368,6 @@ void BambuCloudClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
     }
 
     case MQTT_EVENT_DISCONNECTED:
-      cloud_mqtt_lease_.reset();
       mqtt_connected_ = false;
       mqtt_subscription_acknowledged_ = false;
       received_live_payload_ = false;
@@ -2424,7 +2424,6 @@ void BambuCloudClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
     }
 
     case MQTT_EVENT_ERROR:
-      cloud_mqtt_lease_.reset();
       mqtt_connected_ = false;
       mqtt_subscription_acknowledged_ = false;
       received_live_payload_ = false;
@@ -2465,7 +2464,13 @@ void BambuCloudClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
 }
 
 void BambuCloudClient::stop_mqtt_client() {
-  cloud_mqtt_lease_.reset();
+  if (mqtt_client_ != nullptr && task_handle_ != nullptr &&
+      xTaskGetCurrentTaskHandle() != task_handle_) {
+    mqtt_stop_requested_ = true;
+    xTaskNotifyGive(task_handle_);
+    return;
+  }
+
   mqtt_connected_ = false;
   mqtt_subscription_acknowledged_ = false;
   received_live_payload_ = false;
@@ -2623,14 +2628,6 @@ bool BambuCloudClient::ensure_mqtt_client_started() {
     return true;
   }
 
-  if (resource_arbiter_ != nullptr) {
-    cloud_mqtt_lease_ =
-        resource_arbiter_->try_acquire(ResourceKind::kTlsCloudMqtt, "cloud-mqtt", "connect");
-    if (!cloud_mqtt_lease_) {
-      return false;
-    }
-  }
-
   mqtt_client_id_ = "printsphere-cloud-" + std::to_string(static_cast<unsigned int>(esp_random()));
   mqtt_report_topic_ = desired_report_topic;
   mqtt_request_topic_ = desired_request_topic;
@@ -2656,7 +2653,6 @@ bool BambuCloudClient::ensure_mqtt_client_started() {
   log_heap_diag("cloud mqtt before client init");
   mqtt_client_ = esp_mqtt_client_init(&mqtt_cfg);
   if (mqtt_client_ == nullptr) {
-    cloud_mqtt_lease_.reset();
     ESP_LOGW(kTag, "Failed to create Bambu Cloud MQTT client");
     log_heap_diag("cloud mqtt client init failed");
     return false;
@@ -2666,7 +2662,6 @@ bool BambuCloudClient::ensure_mqtt_client_started() {
   esp_mqtt_client_register_event(mqtt_client_, MQTT_EVENT_ANY,
                                  &BambuCloudClient::mqtt_event_handler, this);
   if (esp_mqtt_client_start(mqtt_client_) != ESP_OK) {
-    cloud_mqtt_lease_.reset();
     ESP_LOGW(kTag, "Failed to start Bambu Cloud MQTT client");
     esp_mqtt_client_destroy(mqtt_client_);
     mqtt_client_ = nullptr;
@@ -3195,6 +3190,9 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
       initial_sync_sent_ = false;
       delayed_start_sent_ = false;
       initial_sync_tick_ = 0;
+      CloudRestRuntimeState rest = rest_runtime_copy();
+      rest.printer_online = false;
+      store_rest_runtime(std::move(rest), false);
       CloudLiveRuntimeState runtime = live_runtime_copy();
       runtime.connected = false;
       copy_text(&runtime.stage, "offline");
@@ -3218,6 +3216,9 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
       initial_sync_tick_ = 0;
       // Clear stale HMS/error state so it does not persist across reconnects.
       {
+        CloudRestRuntimeState rest = rest_runtime_copy();
+        rest.printer_online = true;
+        store_rest_runtime(std::move(rest), false);
         CloudLiveRuntimeState runtime = live_runtime_copy();
         runtime.hms_codes.clear();
         runtime.hms_alert_count = 0;
@@ -3258,6 +3259,11 @@ void BambuCloudClient::task_loop() {
     }
     if (rest_runtime_dirty_.exchange(false)) {
       publish_combined_snapshot();
+    }
+
+    if (mqtt_stop_requested_.exchange(false)) {
+      stop_mqtt_client();
+      cloud_mqtt_restart_not_before_tick = 0;
     }
 
     if (reconfigure_requested_.exchange(false)) {
@@ -3952,19 +3958,9 @@ bool BambuCloudClient::request_verification_code() {
 bool BambuCloudClient::fetch_bindings() {
   int status_code = 0;
   std::string response_body;
-  {
-    ResourceArbiter::Lease rest_lease;
-    if (resource_arbiter_ != nullptr) {
-      rest_lease =
-          resource_arbiter_->try_acquire(ResourceKind::kHttpCloudRest, "cloud", "bindings");
-      if (!rest_lease) {
-        return true;
-      }
-    }
-    if (!perform_json_request(cloud_api_url(credentials_.region, kBindPath), "GET", {},
-                              access_token_, &status_code, &response_body)) {
-      return false;
-    }
+  if (!perform_json_request(cloud_api_url(credentials_.region, kBindPath), "GET", {},
+                            access_token_, &status_code, &response_body)) {
+    return false;
   }
   if (status_code == 401 || status_code == 403) {
     clear_persisted_access_token();
@@ -4085,20 +4081,10 @@ bool BambuCloudClient::fetch_bindings() {
 bool BambuCloudClient::fetch_latest_preview(bool allow_preview_download) {
   int status_code = 0;
   std::string response_body;
-  {
-    ResourceArbiter::Lease rest_lease;
-    if (resource_arbiter_ != nullptr) {
-      rest_lease =
-          resource_arbiter_->try_acquire(ResourceKind::kHttpCloudRest, "cloud", "preview-tasks");
-      if (!rest_lease) {
-        return true;
-      }
-    }
-    if (!perform_json_request(cloud_api_url(credentials_.region, kTasksPath), "GET", {},
-                              access_token_, &status_code, &response_body)) {
-      ESP_LOGW(kTag, "Bambu Cloud tasks request failed");
-      return false;
-    }
+  if (!perform_json_request(cloud_api_url(credentials_.region, kTasksPath), "GET", {},
+                            access_token_, &status_code, &response_body)) {
+    ESP_LOGW(kTag, "Bambu Cloud tasks request failed");
+    return false;
   }
 
   if (status_code == 401 || status_code == 403) {
@@ -4236,13 +4222,10 @@ bool BambuCloudClient::fetch_latest_preview(bool allow_preview_download) {
   }
   if (allow_preview_download && !selected_cover.empty() &&
       (selected_preview_key != cached_preview_url_ || cached_preview_blob_ == nullptr)) {
-    bool preview_download_deferred = false;
-    cached_preview_blob_ = download_preview_image(selected_cover, &preview_download_deferred);
+    cached_preview_blob_ = download_preview_image(selected_cover);
     if (cached_preview_blob_ != nullptr) {
       cached_preview_url_ = selected_preview_key;
       log_blob_diag("cloud preview cached", cached_preview_blob_);
-    } else if (preview_download_deferred) {
-      ESP_LOGI(kTag, "Cloud preview download deferred by resource arbiter");
     } else {
       ESP_LOGW(kTag, "Cloud preview download failed");
     }
@@ -4261,25 +4244,9 @@ bool BambuCloudClient::fetch_latest_preview(bool allow_preview_download) {
   return true;
 }
 
-std::shared_ptr<std::vector<uint8_t>> BambuCloudClient::download_preview_image(
-    const std::string& url, bool* deferred) {
-  if (deferred != nullptr) {
-    *deferred = false;
-  }
+std::shared_ptr<std::vector<uint8_t>> BambuCloudClient::download_preview_image(const std::string& url) {
   if (url.empty()) {
     return nullptr;
-  }
-
-  ResourceArbiter::Lease rest_lease;
-  if (resource_arbiter_ != nullptr) {
-    rest_lease =
-        resource_arbiter_->try_acquire(ResourceKind::kHttpCloudRest, "cloud", "preview-image");
-    if (!rest_lease) {
-      if (deferred != nullptr) {
-        *deferred = true;
-      }
-      return nullptr;
-    }
   }
 
   log_heap_diag("cloud preview download start");

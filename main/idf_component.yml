@@ -1,5 +1,9 @@
 dependencies:
   idf:
-    version: ">=5.5.0"
+    version: ">=6.0.0"
   lvgl/lvgl:
-    version: "9.4.0"
+    version: "9.5.0"
+  espressif/cjson:
+    version: "^1.7.19"
+  espressif/mqtt:
+    version: "^1.0.0"

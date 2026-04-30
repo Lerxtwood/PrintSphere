@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_interface.h"
 #include "esp_lcd_panel_io.h"
@@ -10,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #include "esp_vfs_fat.h"
 #include "esp_spiffs.h"
 #include "driver/gpio.h"
@@ -28,6 +30,7 @@
 
 static const char *TAG = "ESP32-S3-Touch-AMOLED-1.75";
 
+#define BSP_LCD_DMA_STAGING_ROWS (4)
 static i2c_master_bus_handle_t i2c_handle = NULL; // I2C Handle
 static bool i2c_initialized = false;
 static esp_io_expander_handle_t io_expander = NULL; // IO expander tca9554 handle
@@ -81,6 +84,8 @@ typedef struct {
     bsp_display_rotation_t rotation;
     uint16_t *rotation_buffer;
     size_t rotation_buffer_pixels;
+    bool te_sync_mode;
+    uint8_t staging_slot;
 } bsp_rotation_panel_t;
 
 static bsp_rotation_panel_t rotation_panel = {0};
@@ -113,6 +118,8 @@ static esp_err_t bsp_rotation_panel_del(esp_lcd_panel_t *panel)
     free(ctx->rotation_buffer);
     ctx->rotation_buffer = NULL;
     ctx->rotation_buffer_pixels = 0;
+    ctx->te_sync_mode = false;
+    ctx->staging_slot = 0;
     return esp_lcd_panel_del(ctx->target);
 }
 
@@ -125,11 +132,7 @@ static bool bsp_rotation_panel_ensure_buffer(bsp_rotation_panel_t *ctx, size_t p
 
     free(ctx->rotation_buffer);
     ctx->rotation_buffer = heap_caps_malloc(pixels * sizeof(uint16_t),
-                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (ctx->rotation_buffer == NULL)
-    {
-        ctx->rotation_buffer = heap_caps_malloc(pixels * sizeof(uint16_t), MALLOC_CAP_8BIT);
-    }
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
     ctx->rotation_buffer_pixels = ctx->rotation_buffer ? pixels : 0;
     return ctx->rotation_buffer != NULL;
 }
@@ -165,6 +168,64 @@ static void bsp_rotation_panel_rotate_region_270(const uint16_t *src, uint16_t *
     }
 }
 
+static esp_err_t bsp_rotation_panel_draw_staged(bsp_rotation_panel_t *ctx, int x_start, int y_start,
+                                                int x_end, int y_end, const uint16_t *src)
+{
+    const int width = x_end - x_start;
+    const int height = y_end - y_start;
+    if (width <= 0 || height <= 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const size_t pixels = (size_t)width * height;
+    if (ctx->te_sync_mode && height > BSP_LCD_DMA_STAGING_ROWS)
+    {
+        const int max_rows = BSP_LCD_DMA_STAGING_ROWS;
+        const size_t max_pixels = (size_t)width * max_rows;
+        if (!bsp_rotation_panel_ensure_buffer(ctx, max_pixels * 2))
+        {
+            ESP_LOGE(TAG, "Unable to allocate %" PRIu32 " px DMA staging buffer",
+                     (uint32_t)(max_pixels * 2));
+            return ESP_ERR_NO_MEM;
+        }
+
+        for (int y = 0; y < height;)
+        {
+            const int rows = (height - y) > max_rows ? max_rows : (height - y);
+            const size_t chunk_pixels = (size_t)width * rows;
+            uint16_t *staging = ctx->rotation_buffer + ((size_t)ctx->staging_slot * max_pixels);
+            ctx->staging_slot ^= 1;
+            memcpy(staging, src + ((size_t)y * width),
+                   chunk_pixels * sizeof(uint16_t));
+            esp_err_t err = esp_lcd_panel_draw_bitmap(ctx->target,
+                                                      x_start,
+                                                      y_start + y,
+                                                      x_end,
+                                                      y_start + y + rows,
+                                                      staging);
+            if (err != ESP_OK)
+            {
+                return err;
+            }
+            y += rows;
+        }
+
+        return ESP_OK;
+    }
+
+    if (!bsp_rotation_panel_ensure_buffer(ctx, pixels))
+    {
+        ESP_LOGE(TAG, "Unable to allocate %" PRIu32 " px DMA staging buffer",
+                 (uint32_t)pixels);
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(ctx->rotation_buffer, src, pixels * sizeof(uint16_t));
+    return esp_lcd_panel_draw_bitmap(ctx->target, x_start, y_start, x_end, y_end,
+                                     ctx->rotation_buffer);
+}
+
 static esp_err_t bsp_rotation_panel_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start,
                                                 int x_end, int y_end, const void *color_data)
 {
@@ -176,6 +237,11 @@ static esp_err_t bsp_rotation_panel_draw_bitmap(esp_lcd_panel_t *panel, int x_st
 
     if (ctx->rotation != BSP_DISPLAY_ROTATE_90 && ctx->rotation != BSP_DISPLAY_ROTATE_270)
     {
+        if (color_data && esp_ptr_external_ram(color_data))
+        {
+            return bsp_rotation_panel_draw_staged(ctx, x_start, y_start, x_end, y_end,
+                                                 (const uint16_t *)color_data);
+        }
         return esp_lcd_panel_draw_bitmap(ctx->target, x_start, y_start, x_end, y_end, color_data);
     }
 
@@ -276,6 +342,8 @@ static esp_lcd_panel_handle_t bsp_rotation_panel_wrap(esp_lcd_panel_handle_t tar
     rotation_panel.base.user_data = &rotation_panel;
     rotation_panel.target = target;
     rotation_panel.rotation = BSP_DISPLAY_ROTATE_0;
+    rotation_panel.te_sync_mode = false;
+    rotation_panel.staging_slot = 0;
     return &rotation_panel.base;
 }
 
@@ -543,8 +611,9 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void)
 #define LCD_LEDC_CH (CONFIG_BSP_DISPLAY_BRIGHTNESS_LEDC_CH)
 #define LVGL_TICK_PERIOD_MS (CONFIG_BSP_DISPLAY_LVGL_TICK)
 #define LVGL_MAX_SLEEP_MS (CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP)
+#define BSP_LCD_QSPI_PCLK_HZ (80 * 1000 * 1000)
 #define LVGL_BUFFER_HEIGHT_PSRAM (12)
-#define LVGL_BUFFER_HEIGHT_INTERNAL (8)
+#define LVGL_BUFFER_HEIGHT_INTERNAL (12)
 
 esp_err_t bsp_display_brightness_init(void)
 {
@@ -649,7 +718,7 @@ esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_hand
     ESP_ERROR_CHECK(spi_bus_initialize(BSP_LCD_SPI_NUM, &buscfg, SPI_DMA_CH_AUTO));
 
     esp_lcd_panel_io_spi_config_t io_config = CO5300_PANEL_IO_QSPI_CONFIG(BSP_LCD_CS, NULL, NULL);
-    io_config.pclk_hz = 80 * 1000 * 1000;  // CO5300 supports up to 80 MHz QSPI
+    io_config.pclk_hz = BSP_LCD_QSPI_PCLK_HZ;
     io_config.trans_queue_depth = CONFIG_BSP_LCD_TRANS_QUEUE_DEPTH;
     co5300_vendor_config_t vendor_config = {
         .init_cmds = lcd_init_cmds,
@@ -731,14 +800,18 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
     assert(cfg != NULL);
     const size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
     const bool psram_available = psram_total > 0;
-    const bool use_te_sync = (cfg->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC);
-    // Always use PSRAM for the LVGL draw buffer when available.
-    // With TE sync + PSRAM: the adapter does partial 12-line flushes, each requiring a
-    // ~11KB DMA bounce-copy at flush time. This is fine because the bounce buffer is
-    // small and transient. The adapter ignores buffer_height when use_psram=false and
-    // instead tries to allocate a full-frame (434KB) DMA-capable internal buffer, which
-    // is impossible. DMA exhaustion from AES is fixed by disabling CONFIG_MBEDTLS_HARDWARE_AES.
+    const esp_lv_adapter_tear_avoid_mode_t requested_tear_mode = cfg->tear_avoid_mode;
+    esp_lv_adapter_tear_avoid_mode_t tear_mode = cfg->tear_avoid_mode;
+    if (tear_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE &&
+        tear_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) {
+        ESP_LOGW(TAG, "SPI/QSPI display mode %d is not supported by this panel path; using NONE",
+                 tear_mode);
+        tear_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE;
+    }
+
+    const bool use_te_sync = (tear_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC);
     const bool use_psram = psram_available;
+
     const uint32_t buffer_height = use_psram ? LVGL_BUFFER_HEIGHT_PSRAM : LVGL_BUFFER_HEIGHT_INTERNAL;
     const size_t max_transfer_sz = BSP_LCD_H_RES * buffer_height * BSP_LCD_BITS_PER_PIXEL / 8;
     const bsp_display_config_t disp_config = {
@@ -747,13 +820,19 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
 
     BSP_ERROR_CHECK_RETURN_NULL(bsp_display_new(&disp_config, &panel_handle, &io_handle));
     adapter_panel_handle = bsp_rotation_panel_wrap(panel_handle);
+    rotation_panel.te_sync_mode = use_te_sync;
 
-    ESP_LOGI(TAG, "LVGL display buffers: psram=%s height=%" PRIu32 " max_transfer=%u queue_depth=%d double_buffer=%s",
+    ESP_LOGI(TAG, "LVGL display buffers: psram=%s lvgl_psram=%s height=%" PRIu32 " max_transfer=%u qspi=%uMHz queue_depth=%d tear_mode=%d requested_tear_mode=%d double_buffer=%s dma_stage_rows=%d",
+             psram_available ? "yes" : "no",
              use_psram ? "yes" : "no",
              buffer_height,
              (unsigned int)max_transfer_sz,
+             (unsigned int)(BSP_LCD_QSPI_PCLK_HZ / 1000000),
              CONFIG_BSP_LCD_TRANS_QUEUE_DEPTH,
-             (use_psram && !use_te_sync) ? "yes" : "no");
+             tear_mode,
+             requested_tear_mode,
+             (use_psram && !use_te_sync) ? "yes" : "no",
+             BSP_LCD_DMA_STAGING_ROWS);
 
     ESP_LOGD(TAG, "Add LCD screen");
     esp_lv_adapter_display_config_t disp_cfg = {
@@ -767,31 +846,26 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
             .buffer_height = buffer_height,
             .use_psram = use_psram,
             .enable_ppa_accel = false,
-            // Double-buffer saves ~432KB PSRAM but is not needed with TE sync
-            // (TE sync already prevents tearing; double-buffering would only
-            // matter to hide latency which TE sync already handles).
             .require_double_buffer = use_psram && !use_te_sync,
         },
-        .tear_avoid_mode = cfg->tear_avoid_mode,
-        // TE GPIO13: CO5300 asserts TE at start of each frame blanking interval.
-        // The adapter waits for the TE edge before beginning each SPI flush,
-        // ensuring the display scan-line is in the blanking region and cannot
-        // overtake the SPI write → no horizontal tearing bands.
+        .tear_avoid_mode = tear_mode,
         .te_sync = use_te_sync
             ? (esp_lv_adapter_te_sync_config_t){
-                .gpio_num              = BSP_LCD_TE_GPIO,
-                .time_tvdl_ms          = 0,   // auto (13 ms @ 60 Hz)
-                .time_tvdh_ms          = 0,   // auto (1 ms)
-                .bus_freq_hz           = 80 * 1000 * 1000, // 80 MHz QSPI
-                .data_lines            = 4,   // QSPI
-                .bits_per_pixel        = BSP_LCD_BITS_PER_PIXEL,
-                .intr_type             = GPIO_INTR_DISABLE, // auto-detect edge
-                .refresh_window_percent = 0,  // auto (66%)
-              }
+                .gpio_num = BSP_LCD_TE_GPIO,
+                .time_tvdl_ms = 0,
+                .time_tvdh_ms = 0,
+                .bus_freq_hz = BSP_LCD_QSPI_PCLK_HZ,
+                .data_lines = 4,
+                .bits_per_pixel = BSP_LCD_BITS_PER_PIXEL,
+                .intr_type = GPIO_INTR_DISABLE,
+                .refresh_window_percent = 0,
+            }
             : ESP_LV_ADAPTER_TE_SYNC_DISABLED(),
     };
 
-    if (!psram_available) {
+    if (use_psram) {
+        ESP_LOGI(TAG, "Using PSRAM LVGL draw buffers with internal SPI DMA staging");
+    } else {
         ESP_LOGW(TAG, "PSRAM not available, using single internal LVGL buffer");
     }
 

@@ -369,21 +369,11 @@ std::string optional_temperature_text(const char* label, float temperature_c, bo
   return buffer;
 }
 
-bool decode_preview_png(ResourceArbiter* resource_arbiter,
-                        const std::shared_ptr<std::vector<uint8_t>>& encoded_blob,
+bool decode_preview_png(const std::shared_ptr<std::vector<uint8_t>>& encoded_blob,
                         std::shared_ptr<std::vector<uint8_t>>* decoded_blob,
                         lv_image_dsc_t* image_dsc) {
   if (!encoded_blob || encoded_blob->empty() || decoded_blob == nullptr || image_dsc == nullptr) {
     return false;
-  }
-
-  ResourceArbiter::Lease decode_lease;
-  if (resource_arbiter != nullptr) {
-    decode_lease =
-        resource_arbiter->try_acquire(ResourceKind::kPngDecode, "ui", "preview-png");
-    if (!decode_lease) {
-      return false;
-    }
   }
 
   png_image image;
@@ -456,6 +446,53 @@ uint32_t scale_color(uint32_t color, uint16_t scale_0_to_255) {
   const uint8_t sb =
       static_cast<uint8_t>((static_cast<uint32_t>(b) * scale_0_to_255 + 127U) / 255U);
   return (static_cast<uint32_t>(sr) << 16) | (static_cast<uint32_t>(sg) << 8) | sb;
+}
+
+uint32_t hash_mix(uint32_t hash, uint32_t value) {
+  hash ^= value + 0x9E3779B9U + (hash << 6) + (hash >> 2);
+  return hash;
+}
+
+uint32_t hash_string(uint32_t hash, const std::string& value) {
+  for (char ch : value) {
+    hash = hash_mix(hash, static_cast<uint8_t>(ch));
+  }
+  return hash_mix(hash, static_cast<uint32_t>(value.size()));
+}
+
+uint32_t ams_ui_signature(const PrinterSnapshot& snapshot) {
+  uint32_t hash = 2166136261U;
+  hash = hash_mix(hash, snapshot.tray_now < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(snapshot.tray_now));
+  hash = hash_mix(hash, snapshot.tray_tar < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(snapshot.tray_tar));
+  if (!snapshot.ams) {
+    return hash_mix(hash, 0);
+  }
+
+  hash = hash_mix(hash, snapshot.ams->count);
+  if (snapshot.ams->count == 0) {
+    return hash;
+  }
+
+  const AmsUnitInfo& unit = snapshot.ams->units[0];
+  hash = hash_mix(hash, unit.humidity_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(unit.humidity_pct));
+  hash = hash_mix(hash, static_cast<uint32_t>(std::lround(unit.temperature_c * 10.0f)));
+
+  for (int i = 0; i < kMaxAmsTrays; ++i) {
+    const AmsTrayInfo& tray = unit.trays[i];
+    hash = hash_mix(hash, tray.present ? 1U : 0U);
+    hash = hash_mix(hash, tray.active ? 1U : 0U);
+    hash = hash_mix(hash, tray.color_rgba);
+    hash = hash_mix(hash, tray.remain_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(tray.remain_pct));
+    hash = hash_string(hash, tray.material_type);
+  }
+
+  const AmsTrayInfo& ext = snapshot.ams->external_spool;
+  hash = hash_mix(hash, ext.present ? 1U : 0U);
+  hash = hash_mix(hash, ext.active ? 1U : 0U);
+  hash = hash_mix(hash, ext.color_rgba);
+  hash = hash_mix(hash, ext.remain_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(ext.remain_pct));
+  hash = hash_string(hash, ext.material_type);
+  return hash;
 }
 
 // Ambient sweep (kAmbientSweep) removed — the rotating arc during printing caused
@@ -1032,6 +1069,12 @@ esp_err_t Ui::initialize() {
         return cfg;
       }(),
       .rotation = ESP_LV_ADAPTER_ROTATE_0,
+      // TE_SYNC is safe again: managed_components/espressif__esp_lvgl_adapter
+      // is locally patched to use bounded timeouts in te_sync_wait_for_vsync()
+      // and the SPI TX-done notify (lvgl_bridge_v9.c). Without TE on this
+      // panel + adapter v0.4.2, single PSRAM buffer tears badly and the
+      // unbounded LVGL flush rate steals CPU/PSRAM-bus from mbedTLS, which
+      // causes printer-MQTT TLS handshakes to time out (select() timeout).
       .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC,
       .touch_flags = {
           .swap_xy = 0,
@@ -1207,7 +1250,7 @@ int Ui::consume_printer_switch_request() {
   return val;
 }
 
-void Ui::apply_page0_parallax() {
+void Ui::apply_page0_parallax(bool force) {
   if (page0_title_ == nullptr || page0_card_list_ == nullptr || pager_ == nullptr) {
     return;
   }
@@ -1217,6 +1260,10 @@ void Ui::apply_page0_parallax() {
 
   const int page_w = board::kDisplayWidth;
   const int clamped = (scroll_x > page_w) ? page_w : scroll_x;
+  if (!force && clamped == last_parallax_clamped_) {
+    return;
+  }
+  last_parallax_clamped_ = clamped;
 
   // Page 0 content: fade out + shift up as we scroll away
   const int32_t title_y = static_cast<int32_t>(kParallaxTitleMaxY * clamped / page_w);
@@ -1461,6 +1508,9 @@ void Ui::apply_snapshot(const PrinterSnapshot& snapshot) {
   if (!initialized_) {
     return;
   }
+  if (scrolling_) {
+    return;
+  }
 
   // Pre-decode preview PNG outside LVGL lock, but only when the preview page is
   // actually active. The decoded cover is ~1 MB, lives in PSRAM, and is kept
@@ -1478,8 +1528,7 @@ void Ui::apply_snapshot(const PrinterSnapshot& snapshot) {
       !snapshot.preview_blob->empty() &&
       (!last_preview_raw_ || last_preview_raw_->empty());
   if (preview_page_active && (preview_blob_changed || needs_first_decode)) {
-    decode_preview_png(resource_arbiter_, snapshot.preview_blob, &pre_decoded_raw,
-                       &pre_decoded_dsc);
+    decode_preview_png(snapshot.preview_blob, &pre_decoded_raw, &pre_decoded_dsc);
   }
 
   LvglLockGuard lock(500, "apply_snapshot");
@@ -1487,7 +1536,6 @@ void Ui::apply_snapshot(const PrinterSnapshot& snapshot) {
     return;
   }
 
-  const PrinterSnapshot previous_snapshot = last_snapshot_;
   last_snapshot_ = snapshot;
   if (scrolling_) {
     deferred_snapshot_ = snapshot;
@@ -1732,7 +1780,12 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
 
   // --- AMS page rendering ---
   const uint8_t ams_count = snapshot.ams ? snapshot.ams->count : 0;
-  if (ams_page_available_ && ams_count > 0) {
+  const uint32_t ams_signature = ams_ui_signature(snapshot);
+  const bool ams_visible = scrolling_ || active_page_ == 1;
+  const bool render_ams =
+      ams_visible && ams_signature != last_rendered_ams_signature_;
+  if (ams_page_available_ && ams_count > 0 && render_ams) {
+    last_rendered_ams_signature_ = ams_signature;
     const AmsUnitInfo& unit = snapshot.ams->units[0];
     const bool ext_spool_active = snapshot.tray_now == 254 || snapshot.tray_tar == 254;
 
@@ -1887,8 +1940,9 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     set_hidden(ams_tray_row_, false);
     set_hidden(ams_note_, true);
   } else if (!ams_page_available_) {
-    // Page is hidden, nothing to do.
-  } else {
+    last_rendered_ams_signature_ = UINT32_MAX;
+  } else if (ams_visible && ams_signature != last_rendered_ams_signature_) {
+    last_rendered_ams_signature_ = ams_signature;
     set_hidden(ams_tray_row_, true);
     set_hidden(ams_ext_col_, true);
     set_hidden(ams_note_, false);
@@ -2726,7 +2780,7 @@ void Ui::apply_page_visibility() {
   // Overlay + page0 opacity are driven by apply_page0_parallax.
   // When not scrolling, snap to final state.
   if (!scrolling_) {
-    apply_page0_parallax();
+    apply_page0_parallax(true);
   }
 
   apply_logo_visibility();
@@ -2792,7 +2846,7 @@ void Ui::update_page_availability_locked(const PrinterSnapshot& snapshot) {
     lv_obj_scroll_to_view(target_page, LV_ANIM_OFF);
   }
   scrolling_ = false;
-  apply_page0_parallax();
+  apply_page0_parallax(true);
   // Ring timer resume is handled by apply_ring_visual_locked via apply_snapshot.
 }
 
@@ -2908,7 +2962,7 @@ void Ui::set_active_page(int page) {
     preview_image_visible_ = ensure_preview_image_loaded_locked(false);
   }
   scrolling_ = false;
-  apply_page0_parallax();
+  apply_page0_parallax(true);
   // Ring timer resume is handled by apply_ring_visual_locked below.
   apply_page_visibility();
   if (deferred_snapshot_pending_) {
@@ -2939,7 +2993,7 @@ void Ui::set_pager_scroll_locked(bool locked) {
     lv_obj_scroll_to_x(pager_, target_x, LV_ANIM_OFF);
   }
   scrolling_ = false;
-  apply_page0_parallax();
+  apply_page0_parallax(true);
   apply_page_visibility();
 }
 
@@ -2961,19 +3015,6 @@ void Ui::handle_pager_event(lv_event_t* event) {
 
   if (code == LV_EVENT_SCROLL_BEGIN) {
     scrolling_ = true;
-
-    // Eagerly attach already-decoded images for adjacent pages so they are
-    // visible during the scroll transition. First-time PNG decode is kept out
-    // of this LVGL event path.
-    if (preview_page_available_ && !preview_image_visible_) {
-      preview_image_visible_ = ensure_preview_image_loaded_locked(false);
-      if (preview_image_visible_ && !preview_text_image_mode_) {
-        // Reposition text so the title doesn't sit on top of the image.
-        set_hidden(page2_note_, true);
-        lv_obj_align(page2_subnote_, LV_ALIGN_CENTER, 0, kPage2NoteWithImageY);
-        preview_text_image_mode_ = true;
-      }
-    }
 
     apply_page_visibility();
     return;

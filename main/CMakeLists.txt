@@ -17,7 +17,6 @@ idf_component_register(
         "src/printer_client.cpp"
         "src/printer_state.cpp"
         "src/debug_log_buffer.cpp"
-        "src/resource_arbiter.cpp"
         "src/setup_portal.cpp"
         "src/status_resolver.cpp"
         "src/ui.cpp"
@@ -38,7 +37,6 @@ idf_component_register(
         esp_event
         esp_http_client
         esp_http_server
-        json
         mqtt
         esp_netif
         espressif__esp_new_jpeg
