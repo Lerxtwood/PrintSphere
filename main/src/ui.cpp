@@ -1061,27 +1061,16 @@ esp_err_t Ui::initialize() {
 
   portal_hint_boot_ms_ = static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
 
-  bsp_display_cfg_t display_cfg = {
-      .lv_adapter_cfg = []() {
-        esp_lv_adapter_config_t cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
-        // Pin LVGL render task to core 1 so WiFi/BT on core 0 can't interrupt rendering.
-        cfg.task_core_id = 1;
-        return cfg;
-      }(),
-      .rotation = ESP_LV_ADAPTER_ROTATE_0,
-      // TE_SYNC is safe again: managed_components/espressif__esp_lvgl_adapter
-      // is locally patched to use bounded timeouts in te_sync_wait_for_vsync()
-      // and the SPI TX-done notify (lvgl_bridge_v9.c). Without TE on this
-      // panel + adapter v0.4.2, single PSRAM buffer tears badly and the
-      // unbounded LVGL flush rate steals CPU/PSRAM-bus from mbedTLS, which
-      // causes printer-MQTT TLS handshakes to time out (select() timeout).
-      .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC,
-      .touch_flags = {
-          .swap_xy = 0,
-          .mirror_x = 1,
-          .mirror_y = 1,
-      },
-  };
+  bsp_display_cfg_t display_cfg = BSP_DISPLAY_CFG_DEFAULT();
+  // Pin LVGL render task to core 1 so WiFi/BT on core 0 can't interrupt rendering.
+  display_cfg.task_affinity = 1;
+  display_cfg.rotation = BSP_DISPLAY_ROTATE_0;
+  // 24 lines * 466 * 2B = ~22KB per buffer in PSRAM. Double-buffered for
+  // tearless animation. esp_lvgl_port serializes flushes via the panel_io's
+  // on_color_trans_done callback, so the QSPI bus is naturally rate-limited
+  // and mbedTLS keeps its bandwidth (no more TLS handshake timeouts).
+  display_cfg.buffer_height_lines = 24;
+  display_cfg.double_buffer = true;
   apply_touch_rotation_flags(display_rotation_, &display_cfg);
 
   display_ = bsp_display_start_with_config(&display_cfg);
@@ -3214,7 +3203,7 @@ void Ui::wake_display() {
   screen_power_mode_ = ScreenPowerMode::kAwake;
   apply_brightness_policy();
   if (was_off) {
-    esp_lv_adapter_resume();
+    bsp_display_resume();
   }
 }
 
@@ -3291,9 +3280,10 @@ void Ui::update_power_save(bool on_battery, bool print_active) {
     // signal — that would permanently deadlock the worker.  Instead, abort
     // the screen-off transition and stay in the current power mode.
     if (going_off && !was_off) {
-      esp_err_t pause_ret = esp_lv_adapter_pause(1000);
+      esp_err_t pause_ret = bsp_display_pause(1000);
       if (pause_ret != ESP_OK) {
-        ESP_LOGW(kTag, "LVGL worker pause timeout — aborting screen-off to avoid TE deadlock");
+        ESP_LOGW(kTag, "LVGL port stop failed (%s) — aborting screen-off",
+                 esp_err_to_name(pause_ret));
         // Treat a failed screen-off attempt like fresh activity so we don't
         // immediately hammer pause() again on the next main-loop iteration.
         last_activity_tick_ms_.store(now);
@@ -3305,7 +3295,7 @@ void Ui::update_power_save(bool on_battery, bool print_active) {
     apply_brightness_policy();
 
     if (was_off && !going_off) {
-      esp_lv_adapter_resume();
+      bsp_display_resume();
     }
   }
 }

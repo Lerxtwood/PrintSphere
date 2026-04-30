@@ -12,7 +12,8 @@
 #include "esp_io_expander_tca9554.h"
 
 #include "lvgl.h"
-#include "esp_lv_adapter.h"
+#include "esp_lvgl_port.h"
+#include "esp_heap_caps.h"
 
 
 /**************************************************************************************************
@@ -260,17 +261,48 @@ esp_io_expander_handle_t bsp_io_expander_init(void);
 
 /**
  * @brief BSP display configuration structure
+ *
+ * Backed by esp_lvgl_port (Espressif official, single-task, no internal
+ * worker) since v1.6-beta1. The previous esp_lvgl_adapter is replaced.
  */
 typedef struct {
-    esp_lv_adapter_config_t          lv_adapter_cfg;
-    esp_lv_adapter_rotation_t        rotation;
-    esp_lv_adapter_tear_avoid_mode_t tear_avoid_mode;
+    /* Underlying esp_lvgl_port LVGL task configuration. */
+    int task_priority;     /*!< LVGL task priority (default 4) */
+    int task_stack;        /*!< LVGL task stack in bytes (default 10240) */
+    unsigned int task_stack_caps; /*!< heap_caps for LVGL task stack (default MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) */
+    int task_affinity;     /*!< Pin LVGL task to core (-1 = no affinity, 1 = core 1) */
+    int task_max_sleep_ms; /*!< Max sleep between LVGL handler ticks (default 500) */
+    int timer_period_ms;   /*!< LVGL tick period in ms (default 5) */
+
+    bsp_display_rotation_t rotation;
+
+    /* Display buffer sizing in lines (width = BSP_LCD_H_RES). 0 → BSP default. */
+    uint32_t buffer_height_lines;
+    bool double_buffer;    /*!< Allocate two LVGL draw buffers in PSRAM */
+
     struct {
         unsigned int swap_xy;  /*!< Swap X and Y after read coordinates */
         unsigned int mirror_x; /*!< Mirror X after read coordinates */
         unsigned int mirror_y; /*!< Mirror Y after read coordinates */
     } touch_flags;
 } bsp_display_cfg_t;
+
+#define BSP_DISPLAY_CFG_DEFAULT() {                \
+    .task_priority = 4,                            \
+    .task_stack = 10240,                           \
+    .task_stack_caps = (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT), \
+    .task_affinity = 1,                            \
+    .task_max_sleep_ms = 500,                      \
+    .timer_period_ms = 5,                          \
+    .rotation = BSP_DISPLAY_ROTATE_0,              \
+    .buffer_height_lines = 0,                      \
+    .double_buffer = true,                         \
+    .touch_flags = {                               \
+        .swap_xy = 0,                              \
+        .mirror_x = 1,                             \
+        .mirror_y = 1,                             \
+    },                                             \
+}
 
 /**
  * @brief Initialize display
@@ -316,6 +348,20 @@ esp_err_t bsp_display_lock(uint32_t timeout_ms);
  *
  */
 void bsp_display_unlock(void);
+
+/**
+ * @brief Pause the LVGL task (esp_lvgl_port_stop). Used when turning off the
+ *        AMOLED panel which stops generating the TE signal.
+ *
+ * @param timeout_ms Reserved for backward compatibility (not used by
+ *                   esp_lvgl_port).
+ */
+esp_err_t bsp_display_pause(uint32_t timeout_ms);
+
+/**
+ * @brief Resume the LVGL task (esp_lvgl_port_resume).
+ */
+esp_err_t bsp_display_resume(void);
 #endif // BSP_CONFIG_NO_GRAPHIC_LIB == 0
 
 #ifdef __cplusplus

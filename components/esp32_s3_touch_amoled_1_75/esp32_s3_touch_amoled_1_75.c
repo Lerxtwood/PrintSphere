@@ -30,7 +30,6 @@
 
 static const char *TAG = "ESP32-S3-Touch-AMOLED-1.75";
 
-#define BSP_LCD_DMA_STAGING_ROWS (4)
 static i2c_master_bus_handle_t i2c_handle = NULL; // I2C Handle
 static bool i2c_initialized = false;
 static esp_io_expander_handle_t io_expander = NULL; // IO expander tca9554 handle
@@ -38,8 +37,9 @@ static lv_indev_t *disp_indev = NULL;
 sdmmc_card_t *bsp_sdcard = NULL; // Global uSD card handler
 static esp_lcd_touch_handle_t tp = NULL;
 static esp_lcd_panel_handle_t panel_handle = NULL; // LCD panel handle
-static esp_lcd_panel_handle_t adapter_panel_handle = NULL; // Rotation-aware panel handle for LVGL
+static esp_lcd_panel_handle_t lvgl_panel_handle = NULL; // Rotation-aware panel handle for LVGL
 static esp_lcd_panel_io_handle_t io_handle = NULL;
+static lv_display_t *lvgl_display_handle = NULL;
 uint8_t brightness;
 static i2s_chan_handle_t i2s_tx_chan = NULL;
 static i2s_chan_handle_t i2s_rx_chan = NULL;
@@ -84,8 +84,6 @@ typedef struct {
     bsp_display_rotation_t rotation;
     uint16_t *rotation_buffer;
     size_t rotation_buffer_pixels;
-    bool te_sync_mode;
-    uint8_t staging_slot;
 } bsp_rotation_panel_t;
 
 static bsp_rotation_panel_t rotation_panel = {0};
@@ -118,8 +116,6 @@ static esp_err_t bsp_rotation_panel_del(esp_lcd_panel_t *panel)
     free(ctx->rotation_buffer);
     ctx->rotation_buffer = NULL;
     ctx->rotation_buffer_pixels = 0;
-    ctx->te_sync_mode = false;
-    ctx->staging_slot = 0;
     return esp_lcd_panel_del(ctx->target);
 }
 
@@ -178,42 +174,13 @@ static esp_err_t bsp_rotation_panel_draw_staged(bsp_rotation_panel_t *ctx, int x
         return ESP_ERR_INVALID_ARG;
     }
 
+    // esp_lvgl_port relies on the on_color_trans_done callback (registered on
+    // the panel_io) to fire exactly ONCE per LVGL flush, otherwise it marks the
+    // draw buffer free while subsequent chunks are still reading from PSRAM.
+    // We therefore stage the entire LVGL chunk into one internal-RAM buffer
+    // and submit it as a single esp_lcd_panel_draw_bitmap() call. The buffer
+    // grows on demand and is sized for the configured LVGL buffer_height.
     const size_t pixels = (size_t)width * height;
-    if (ctx->te_sync_mode && height > BSP_LCD_DMA_STAGING_ROWS)
-    {
-        const int max_rows = BSP_LCD_DMA_STAGING_ROWS;
-        const size_t max_pixels = (size_t)width * max_rows;
-        if (!bsp_rotation_panel_ensure_buffer(ctx, max_pixels * 2))
-        {
-            ESP_LOGE(TAG, "Unable to allocate %" PRIu32 " px DMA staging buffer",
-                     (uint32_t)(max_pixels * 2));
-            return ESP_ERR_NO_MEM;
-        }
-
-        for (int y = 0; y < height;)
-        {
-            const int rows = (height - y) > max_rows ? max_rows : (height - y);
-            const size_t chunk_pixels = (size_t)width * rows;
-            uint16_t *staging = ctx->rotation_buffer + ((size_t)ctx->staging_slot * max_pixels);
-            ctx->staging_slot ^= 1;
-            memcpy(staging, src + ((size_t)y * width),
-                   chunk_pixels * sizeof(uint16_t));
-            esp_err_t err = esp_lcd_panel_draw_bitmap(ctx->target,
-                                                      x_start,
-                                                      y_start + y,
-                                                      x_end,
-                                                      y_start + y + rows,
-                                                      staging);
-            if (err != ESP_OK)
-            {
-                return err;
-            }
-            y += rows;
-        }
-
-        return ESP_OK;
-    }
-
     if (!bsp_rotation_panel_ensure_buffer(ctx, pixels))
     {
         ESP_LOGE(TAG, "Unable to allocate %" PRIu32 " px DMA staging buffer",
@@ -342,8 +309,6 @@ static esp_lcd_panel_handle_t bsp_rotation_panel_wrap(esp_lcd_panel_handle_t tar
     rotation_panel.base.user_data = &rotation_panel;
     rotation_panel.target = target;
     rotation_panel.rotation = BSP_DISPLAY_ROTATE_0;
-    rotation_panel.te_sync_mode = false;
-    rotation_panel.staging_slot = 0;
     return &rotation_panel.base;
 }
 
@@ -612,8 +577,7 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void)
 #define LVGL_TICK_PERIOD_MS (CONFIG_BSP_DISPLAY_LVGL_TICK)
 #define LVGL_MAX_SLEEP_MS (CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP)
 #define BSP_LCD_QSPI_PCLK_HZ (80 * 1000 * 1000)
-#define LVGL_BUFFER_HEIGHT_PSRAM (12)
-#define LVGL_BUFFER_HEIGHT_INTERNAL (12)
+#define BSP_LVGL_DEFAULT_BUFFER_LINES (24)
 
 esp_err_t bsp_display_brightness_init(void)
 {
@@ -798,89 +762,66 @@ esp_io_expander_handle_t bsp_io_expander_init(void)
 static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
 {
     assert(cfg != NULL);
-    const size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-    const bool psram_available = psram_total > 0;
-    const esp_lv_adapter_tear_avoid_mode_t requested_tear_mode = cfg->tear_avoid_mode;
-    esp_lv_adapter_tear_avoid_mode_t tear_mode = cfg->tear_avoid_mode;
-    if (tear_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE &&
-        tear_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) {
-        ESP_LOGW(TAG, "SPI/QSPI display mode %d is not supported by this panel path; using NONE",
-                 tear_mode);
-        tear_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE;
-    }
 
-    const bool use_te_sync = (tear_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC);
-    const bool use_psram = psram_available;
-
-    const uint32_t buffer_height = use_psram ? LVGL_BUFFER_HEIGHT_PSRAM : LVGL_BUFFER_HEIGHT_INTERNAL;
+    const uint32_t buffer_height = (cfg->buffer_height_lines > 0)
+                                       ? cfg->buffer_height_lines
+                                       : BSP_LVGL_DEFAULT_BUFFER_LINES;
     const size_t max_transfer_sz = BSP_LCD_H_RES * buffer_height * BSP_LCD_BITS_PER_PIXEL / 8;
     const bsp_display_config_t disp_config = {
         .max_transfer_sz = max_transfer_sz,
     };
 
     BSP_ERROR_CHECK_RETURN_NULL(bsp_display_new(&disp_config, &panel_handle, &io_handle));
-    adapter_panel_handle = bsp_rotation_panel_wrap(panel_handle);
-    rotation_panel.te_sync_mode = use_te_sync;
+    lvgl_panel_handle = bsp_rotation_panel_wrap(panel_handle);
 
-    ESP_LOGI(TAG, "LVGL display buffers: psram=%s lvgl_psram=%s height=%" PRIu32 " max_transfer=%u qspi=%uMHz queue_depth=%d tear_mode=%d requested_tear_mode=%d double_buffer=%s dma_stage_rows=%d",
-             psram_available ? "yes" : "no",
-             use_psram ? "yes" : "no",
+    ESP_LOGI(TAG,
+             "LVGL display via esp_lvgl_port: buffer_height=%" PRIu32
+             " max_transfer=%u qspi=%uMHz queue_depth=%d double_buffer=%s buff_spiram=%s",
              buffer_height,
              (unsigned int)max_transfer_sz,
              (unsigned int)(BSP_LCD_QSPI_PCLK_HZ / 1000000),
              CONFIG_BSP_LCD_TRANS_QUEUE_DEPTH,
-             tear_mode,
-             requested_tear_mode,
-             (use_psram && !use_te_sync) ? "yes" : "no",
-             BSP_LCD_DMA_STAGING_ROWS);
+             cfg->double_buffer ? "yes" : "no",
+             "yes");
 
-    ESP_LOGD(TAG, "Add LCD screen");
-    esp_lv_adapter_display_config_t disp_cfg = {
-        .panel = adapter_panel_handle,
-        .panel_io = io_handle,
-        .profile = {
-            .interface = ESP_LV_ADAPTER_PANEL_IF_OTHER,
-            .rotation = cfg->rotation,
-            .hor_res = BSP_LCD_H_RES,
-            .ver_res = BSP_LCD_V_RES,
-            .buffer_height = buffer_height,
-            .use_psram = use_psram,
-            .enable_ppa_accel = false,
-            .require_double_buffer = use_psram && !use_te_sync,
+    const lvgl_port_display_cfg_t disp_cfg = {
+        .io_handle = io_handle,
+        .panel_handle = lvgl_panel_handle,
+        .buffer_size = BSP_LCD_H_RES * buffer_height,
+        .double_buffer = cfg->double_buffer,
+        .hres = BSP_LCD_H_RES,
+        .vres = BSP_LCD_V_RES,
+        .monochrome = false,
+        .color_format = LV_COLOR_FORMAT_RGB565,
+        .rotation = {
+            .swap_xy = false,
+            .mirror_x = false,
+            .mirror_y = false,
         },
-        .tear_avoid_mode = tear_mode,
-        .te_sync = use_te_sync
-            ? (esp_lv_adapter_te_sync_config_t){
-                .gpio_num = BSP_LCD_TE_GPIO,
-                .time_tvdl_ms = 0,
-                .time_tvdh_ms = 0,
-                .bus_freq_hz = BSP_LCD_QSPI_PCLK_HZ,
-                .data_lines = 4,
-                .bits_per_pixel = BSP_LCD_BITS_PER_PIXEL,
-                .intr_type = GPIO_INTR_DISABLE,
-                .refresh_window_percent = 0,
-            }
-            : ESP_LV_ADAPTER_TE_SYNC_DISABLED(),
+        .flags = {
+            .buff_dma = false,
+            .buff_spiram = true,
+            .sw_rotate = false,
+            // CO5300 QSPI expects MSB-first RGB565; LVGL produces little-endian
+            // RGB565, so swap bytes inside the port before pushing to the panel.
+            .swap_bytes = true,
+            .full_refresh = false,
+            .direct_mode = false,
+        },
     };
 
-    if (use_psram) {
-        ESP_LOGI(TAG, "Using PSRAM LVGL draw buffers with internal SPI DMA staging");
-    } else {
-        ESP_LOGW(TAG, "PSRAM not available, using single internal LVGL buffer");
-    }
-
-    lv_display_t *disp = esp_lv_adapter_register_display(&disp_cfg);
-    if (!disp)
-    {
+    lv_display_t *disp = lvgl_port_add_disp(&disp_cfg);
+    if (!disp) {
+        ESP_LOGE(TAG, "lvgl_port_add_disp failed");
         return NULL;
     }
+    lvgl_display_handle = disp;
 
 #if LVGL_VERSION_MAJOR >= 9
     lv_display_add_event_cb(disp, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 #else
     lv_disp_t *disp_v8 = (lv_disp_t *)disp;
-    if (disp_v8 && disp_v8->driver)
-    {
+    if (disp_v8 && disp_v8->driver) {
         disp_v8->driver->rounder_cb = bsp_lvgl_rounder_cb;
     }
 #endif
@@ -894,9 +835,12 @@ static lv_indev_t *bsp_display_indev_init(const bsp_display_cfg_t *cfg, lv_displ
     BSP_ERROR_CHECK_RETURN_NULL(bsp_touch_new(cfg, &tp));
     assert(tp);
 
-    const esp_lv_adapter_touch_config_t touch_cfg = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, tp);
+    const lvgl_port_touch_cfg_t touch_cfg = {
+        .disp = disp,
+        .handle = tp,
+    };
 
-    return esp_lv_adapter_register_touch(&touch_cfg);
+    return lvgl_port_add_touch(&touch_cfg);
 }
 /**********************************************************************************************************
  *
@@ -905,14 +849,7 @@ static lv_indev_t *bsp_display_indev_init(const bsp_display_cfg_t *cfg, lv_displ
  **********************************************************************************************************/
 lv_display_t *bsp_display_start(void)
 {
-    bsp_display_cfg_t cfg = {
-        .lv_adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG(),
-        .rotation = ESP_LV_ADAPTER_ROTATE_0,
-        .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE,
-        .touch_flags = {
-            .swap_xy = 0,
-            .mirror_x = 1,
-            .mirror_y = 1}};
+    bsp_display_cfg_t cfg = BSP_DISPLAY_CFG_DEFAULT();
     return bsp_display_start_with_config(&cfg);
 }
 
@@ -922,15 +859,26 @@ lv_display_t *bsp_display_start_with_config(bsp_display_cfg_t *cfg)
     lv_display_t *disp;
 
     assert(cfg != NULL);
-    BSP_ERROR_CHECK_RETURN_NULL(esp_lv_adapter_init(&cfg->lv_adapter_cfg));
+
+    const lvgl_port_cfg_t port_cfg = {
+        .task_priority = (cfg->task_priority > 0) ? cfg->task_priority : 4,
+        .task_stack = (cfg->task_stack > 0) ? cfg->task_stack : 6144,
+        .task_affinity = cfg->task_affinity,
+        .task_max_sleep_ms = (cfg->task_max_sleep_ms > 0) ? cfg->task_max_sleep_ms : 500,
+        .timer_period_ms = (cfg->timer_period_ms > 0) ? cfg->timer_period_ms : 5,
+        // Place the LVGL task stack in PSRAM by default: after Wi-Fi init the
+        // largest contiguous internal block is typically <10 KB, which is too
+        // small for a stack that must accommodate libpng / nested LVGL widgets.
+        .task_stack_caps = (cfg->task_stack_caps != 0) ? cfg->task_stack_caps
+                                                       : (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+    };
+    BSP_ERROR_CHECK_RETURN_NULL(lvgl_port_init(&port_cfg));
 
     BSP_NULL_CHECK(disp = bsp_display_lcd_init(cfg), NULL);
 
     BSP_NULL_CHECK(disp_indev = bsp_display_indev_init(cfg, disp), NULL);
 
     BSP_ERROR_CHECK_RETURN_NULL(bsp_display_brightness_init());
-
-    ESP_ERROR_CHECK(esp_lv_adapter_start());
 
     return disp;
 }
@@ -998,10 +946,21 @@ esp_err_t bsp_display_rotation_set(bsp_display_rotation_t rotation)
 
 esp_err_t bsp_display_lock(uint32_t timeout_ms)
 {
-    return esp_lv_adapter_lock(timeout_ms);
+    return lvgl_port_lock(timeout_ms) ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 void bsp_display_unlock(void)
 {
-    esp_lv_adapter_unlock();
+    lvgl_port_unlock();
+}
+
+esp_err_t bsp_display_pause(uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    return lvgl_port_stop();
+}
+
+esp_err_t bsp_display_resume(void)
+{
+    return lvgl_port_resume();
 }
