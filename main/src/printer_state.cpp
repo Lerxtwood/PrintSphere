@@ -55,6 +55,34 @@ const char* to_string(PrintLifecycleState state) {
   return "unknown";
 }
 
+const char* to_string(PrintCommand command) {
+  switch (command) {
+    case PrintCommand::kNone:
+      return "none";
+    case PrintCommand::kPause:
+      return "pause";
+    case PrintCommand::kResume:
+      return "resume";
+    case PrintCommand::kStop:
+      return "stop";
+  }
+  return "none";
+}
+
+const char* mqtt_command_token(PrintCommand command) {
+  switch (command) {
+    case PrintCommand::kPause:
+      return "pause";
+    case PrintCommand::kResume:
+      return "resume";
+    case PrintCommand::kStop:
+      return "stop";
+    case PrintCommand::kNone:
+    default:
+      return "";
+  }
+}
+
 const char* to_string(PrinterModel model) {
   switch (model) {
     case PrinterModel::kA1:

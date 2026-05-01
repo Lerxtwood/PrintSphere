@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "mqtt_client.h"
 #include "printsphere/config_store.hpp"
+#include "printsphere/mqtt_telemetry.hpp"
 #include "printsphere/printer_state.hpp"
 
 struct cJSON;
@@ -71,6 +72,9 @@ struct BambuCloudSnapshot {
   uint32_t remaining_seconds = 0;
   uint16_t current_layer = 0;
   uint16_t total_layers = 0;
+  // Slicer estimates from the most recent task descriptor; 0 when unknown.
+  float estimated_filament_weight_g = 0.0f;
+  float estimated_filament_length_mm = 0.0f;
   int print_error_code = 0;
   int hw_switch_state = -1;
   int tray_now = -1;
@@ -159,6 +163,9 @@ class BambuCloudClient {
     std::string preview_url{};
     std::shared_ptr<std::vector<uint8_t>> preview_blob{};
     std::string preview_title{};
+    // Slicer estimates from the most recent task descriptor; 0 when unknown.
+    float estimated_filament_weight_g = 0.0f;
+    float estimated_filament_length_mm = 0.0f;
   };
 
   void set_config_store(const ConfigStore* config_store) { config_store_ = config_store; }
@@ -190,10 +197,13 @@ class BambuCloudClient {
   }
   void submit_verification_code(std::string code);
   bool set_chamber_light(bool on);
+  bool set_print_command(PrintCommand command);
   esp_err_t start();
   BambuCloudSnapshot snapshot() const;
   BambuCloudSnapshot refreshed_snapshot();
   std::vector<CloudDeviceInfo> get_cloud_devices() const;
+  // Reconnect-storm telemetry snapshot for the cloud MQTT session.
+  MqttTelemetry mqtt_telemetry() const;
 
  private:
   enum class AuthMode : uint8_t {
@@ -211,6 +221,8 @@ class BambuCloudClient {
   void stop_mqtt_client();
   void process_pending_chamber_light_command();
   bool publish_chamber_light_command(bool on);
+  void process_pending_print_command();
+  bool publish_print_command(PrintCommand command);
   void task_loop();
   bool login();
   bool authenticate_with_password();
@@ -255,6 +267,13 @@ class BambuCloudClient {
   static uint32_t extract_remaining_seconds(const cJSON* item);
   static uint16_t extract_current_layer(const cJSON* item);
   static uint16_t extract_total_layers(const cJSON* item);
+  // Slicer-derived total filament estimate for a Bambu Cloud task (grams).
+  // Returns 0 when the field is missing or non-numeric (older firmware,
+  // local-only mode, etc.).
+  static float extract_filament_weight_g(const cJSON* item);
+  // Slicer-derived total filament length estimate for a Bambu Cloud task (mm).
+  // Returns 0 when missing.
+  static float extract_filament_length_mm(const cJSON* item);
   static PrintLifecycleState cloud_lifecycle_from_status(const std::string& status_text);
   static std::string cloud_stage_label_for(const std::string& status_text,
                                            PrintLifecycleState lifecycle);
@@ -308,6 +327,7 @@ class BambuCloudClient {
   std::atomic<bool> mqtt_stop_requested_{false};
   std::atomic<bool> chamber_light_command_pending_{false};
   std::atomic<bool> chamber_light_command_on_{false};
+  std::atomic<uint8_t> print_command_pending_{static_cast<uint8_t>(PrintCommand::kNone)};
   std::atomic<bool> received_live_payload_{false};
   std::atomic<bool> initial_sync_sent_{false};
   std::function<void(bool online)> printer_presence_callback_{};
@@ -326,6 +346,14 @@ class BambuCloudClient {
   // and spam the log with "Error create mqtt task".
   std::atomic<int64_t> mqtt_start_backoff_until_us_{0};
   uint32_t mqtt_start_backoff_attempts_{0};
+  // Reconnect-storm telemetry counters (see MqttTelemetry).
+  std::atomic<uint32_t> mqtt_consecutive_failures_{0};
+  std::atomic<uint32_t> mqtt_total_failures_{0};
+  std::atomic<uint32_t> mqtt_total_successes_{0};
+  std::atomic<uint64_t> mqtt_last_attempt_ms_{0};
+  std::atomic<uint64_t> mqtt_last_success_ms_{0};
+  std::atomic<uint64_t> mqtt_last_failure_ms_{0};
+  std::atomic<uint32_t> mqtt_current_backoff_ms_{0};
   std::atomic<int> cloud_payload_probe_logs_remaining_{3};
   mutable std::mutex auth_mutex_{};
   AuthMode auth_mode_ = AuthMode::kPassword;

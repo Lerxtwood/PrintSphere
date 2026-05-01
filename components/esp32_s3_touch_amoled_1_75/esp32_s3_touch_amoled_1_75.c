@@ -82,8 +82,19 @@ typedef struct {
     esp_lcd_panel_t base;
     esp_lcd_panel_handle_t target;
     bsp_display_rotation_t rotation;
+    // Small DMA-capable internal-RAM buffer used as a staging area when the
+    // source bitmap lives in PSRAM (or when rotation produces an output too
+    // large to fit in internal heap as a single chunk). Sized for two slots
+    // of `BSP_LCD_DMA_STAGING_ROWS` rows each so DMA can ping-pong while the
+    // CPU prepares the next slot.
     uint16_t *rotation_buffer;
     size_t rotation_buffer_pixels;
+    // Large rotation scratch placed in PSRAM. Holds the rotated full-screen
+    // bitmap for 90/270 deg rendering. Internal heap is too small for the
+    // 466*466*2 byte working set at full-screen flush. Output is then pushed
+    // out to the panel in DMA-sized chunks via `rotation_buffer`.
+    uint16_t *rotated_buffer;
+    size_t rotated_buffer_pixels;
     bool te_sync_mode;
     uint8_t staging_slot;
 } bsp_rotation_panel_t;
@@ -118,6 +129,9 @@ static esp_err_t bsp_rotation_panel_del(esp_lcd_panel_t *panel)
     free(ctx->rotation_buffer);
     ctx->rotation_buffer = NULL;
     ctx->rotation_buffer_pixels = 0;
+    free(ctx->rotated_buffer);
+    ctx->rotated_buffer = NULL;
+    ctx->rotated_buffer_pixels = 0;
     ctx->te_sync_mode = false;
     ctx->staging_slot = 0;
     return esp_lcd_panel_del(ctx->target);
@@ -135,6 +149,30 @@ static bool bsp_rotation_panel_ensure_buffer(bsp_rotation_panel_t *ctx, size_t p
                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
     ctx->rotation_buffer_pixels = ctx->rotation_buffer ? pixels : 0;
     return ctx->rotation_buffer != NULL;
+}
+
+// Ensure the large PSRAM scratch used for the rotated frame is sized to fit
+// `pixels` (RGB565). PSRAM is plentiful (8 MB on this board) and cheaper than
+// the internal-RAM scratch which can't hold a full-screen rotated bitmap.
+static bool bsp_rotation_panel_ensure_rotated_buffer(bsp_rotation_panel_t *ctx, size_t pixels)
+{
+    if (ctx->rotated_buffer_pixels >= pixels && ctx->rotated_buffer != NULL)
+    {
+        return true;
+    }
+
+    free(ctx->rotated_buffer);
+    ctx->rotated_buffer = heap_caps_malloc(pixels * sizeof(uint16_t),
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ctx->rotated_buffer == NULL)
+    {
+        // Last-ditch fallback to internal heap (small displays / low-PSRAM
+        // configurations). Will silently fail for full-screen flushes on this
+        // board, but keeps small partial-flush rotations working.
+        ctx->rotated_buffer = heap_caps_malloc(pixels * sizeof(uint16_t), MALLOC_CAP_8BIT);
+    }
+    ctx->rotated_buffer_pixels = ctx->rotated_buffer ? pixels : 0;
+    return ctx->rotated_buffer != NULL;
 }
 
 static void bsp_rotation_panel_rotate_region_90(const uint16_t *src, uint16_t *dst,
@@ -179,7 +217,14 @@ static esp_err_t bsp_rotation_panel_draw_staged(bsp_rotation_panel_t *ctx, int x
     }
 
     const size_t pixels = (size_t)width * height;
-    if (ctx->te_sync_mode && height > BSP_LCD_DMA_STAGING_ROWS)
+    // Use the chunked DMA staging path whenever:
+    //   * TE-sync mode is active (need ping-pong slots to overlap CPU/DMA), OR
+    //   * The source bitmap lives in PSRAM (cannot be DMA'd directly, and a
+    //     full-frame rotated buffer is far too large for internal heap).
+    const bool src_in_psram = src != NULL && esp_ptr_external_ram(src);
+    const bool use_chunked =
+        (ctx->te_sync_mode || src_in_psram) && height > BSP_LCD_DMA_STAGING_ROWS;
+    if (use_chunked)
     {
         const int max_rows = BSP_LCD_DMA_STAGING_ROWS;
         const size_t max_pixels = (size_t)width * max_rows;
@@ -253,7 +298,7 @@ static esp_err_t bsp_rotation_panel_draw_bitmap(esp_lcd_panel_t *panel, int x_st
     }
 
     const size_t pixels = (size_t)src_w * src_h;
-    if (!bsp_rotation_panel_ensure_buffer(ctx, pixels))
+    if (!bsp_rotation_panel_ensure_rotated_buffer(ctx, pixels))
     {
         ESP_LOGE(TAG, "Unable to allocate %" PRIu32 " px rotation buffer", (uint32_t)pixels);
         return ESP_ERR_NO_MEM;
@@ -266,7 +311,7 @@ static esp_err_t bsp_rotation_panel_draw_bitmap(esp_lcd_panel_t *panel, int x_st
     int dst_y_end = 0;
     if (ctx->rotation == BSP_DISPLAY_ROTATE_90)
     {
-        bsp_rotation_panel_rotate_region_90(src, ctx->rotation_buffer, src_w, src_h);
+        bsp_rotation_panel_rotate_region_90(src, ctx->rotated_buffer, src_w, src_h);
         dst_x_start = BSP_LCD_H_RES - y_end;
         dst_x_end = BSP_LCD_H_RES - y_start;
         dst_y_start = x_start;
@@ -274,15 +319,19 @@ static esp_err_t bsp_rotation_panel_draw_bitmap(esp_lcd_panel_t *panel, int x_st
     }
     else
     {
-        bsp_rotation_panel_rotate_region_270(src, ctx->rotation_buffer, src_w, src_h);
+        bsp_rotation_panel_rotate_region_270(src, ctx->rotated_buffer, src_w, src_h);
         dst_x_start = y_start;
         dst_x_end = y_end;
         dst_y_start = BSP_LCD_V_RES - x_end;
         dst_y_end = BSP_LCD_V_RES - x_start;
     }
 
-    return esp_lcd_panel_draw_bitmap(ctx->target, dst_x_start, dst_y_start, dst_x_end, dst_y_end,
-                                     ctx->rotation_buffer);
+    // The rotated buffer lives in PSRAM, so it cannot be handed to the SPI DMA
+    // engine directly. Re-use the staged draw path which copies row-chunks
+    // through the small internal-DMA `rotation_buffer`. Output dimensions
+    // after rotation are width=src_h, height=src_w.
+    return bsp_rotation_panel_draw_staged(ctx, dst_x_start, dst_y_start, dst_x_end, dst_y_end,
+                                          ctx->rotated_buffer);
 }
 
 static esp_err_t bsp_rotation_panel_mirror(esp_lcd_panel_t *panel, bool x_axis, bool y_axis)

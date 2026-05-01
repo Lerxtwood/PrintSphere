@@ -1,0 +1,21 @@
+menu "PrintSphere"
+
+    config PRINTSPHERE_EXPERIMENTAL_PRINT_CONTROL
+        bool "Enable experimental print control buttons (Pause/Resume/Stop)"
+        default n
+        help
+            Enables on-display Pause/Resume/Stop buttons on the cloud preview
+            page (page2). When disabled (default), the cover image is shown at
+            its original full size and no print-control widgets are created.
+
+            BACKGROUND: Bambu Lab printers reject Pause/Resume/Stop MQTT
+            commands that are not signed by the proprietary Bambu Studio
+            network plugin. With this option enabled, the firmware will still
+            publish the command, but the printer may silently drop it. Use of
+            any mechanism to make the printer accept the command is left to
+            the integrator and is NOT included in this firmware. Enabling this
+            option carries potential legal exposure depending on jurisdiction
+            (Bambu has issued cease-and-desist notices over related projects).
+            Use at your own risk.
+
+endmenu

@@ -28,6 +28,19 @@ enum class PrintLifecycleState : uint8_t {
   kError,
 };
 
+// Print-control commands sent over MQTT (LAN or Cloud) on
+// `device/<DEVICE_ID>/request`. Mirrors OpenBambuAPI: print.pause / print.resume
+// / print.stop. `kNone` is the inactive sentinel used in pending-state fields.
+enum class PrintCommand : uint8_t {
+  kNone,
+  kPause,
+  kResume,
+  kStop,
+};
+
+const char* to_string(PrintCommand command);
+const char* mqtt_command_token(PrintCommand command);
+
 enum class PrinterModel : uint8_t {
   kUnknown,
   kA1,
@@ -122,9 +135,17 @@ struct PrinterSnapshot {
   bool chamber_light_supported = false;
   bool chamber_light_state_known = false;
   bool chamber_light_on = false;
+  // Pending print-control command (pause/resume/stop). Non-kNone for the brief
+  // window between issuing the command and the printer's next status report.
+  // The UI uses this to render a spinner / disabled state on the relevant button.
+  PrintCommand print_command_pending_kind = PrintCommand::kNone;
   uint32_t remaining_seconds = 0;
   uint16_t current_layer = 0;
   uint16_t total_layers = 0;
+  // Estimated total filament for the active job (from Bambu Cloud task
+  // metadata; 0 when unknown — e.g. local-only mode or older firmware).
+  float estimated_filament_weight_g = 0.0f;
+  float estimated_filament_length_mm = 0.0f;
   int print_error_code = 0;
   std::vector<uint64_t> hms_codes;
   uint16_t hms_alert_count = 0;

@@ -6,6 +6,7 @@
 
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "printsphere/audio_notifier.hpp"
 #include "printsphere/bambu_cloud_client.hpp"
 #include "printsphere/config_store.hpp"
 #include "printsphere/p1s_camera_client.hpp"
@@ -33,14 +34,16 @@ class SetupPortal {
  public:
   SetupPortal(ConfigStore& config_store, const WifiManager& wifi_manager,
               BambuCloudClient& cloud_client, PrinterClient& printer_client,
-              P1sCameraClient& camera_client, Ui& ui, const PmuManager& pmu_manager)
+              P1sCameraClient& camera_client, Ui& ui, const PmuManager& pmu_manager,
+              AudioNotifier& audio_notifier)
       : config_store_(config_store),
         wifi_manager_(wifi_manager),
         cloud_client_(cloud_client),
         printer_client_(printer_client),
         camera_client_(camera_client),
         ui_(ui),
-        pmu_manager_(pmu_manager) {}
+        pmu_manager_(pmu_manager),
+        audio_notifier_(audio_notifier) {}
 
   esp_err_t start();
   void request_unlock_pin();
@@ -62,6 +65,7 @@ class SetupPortal {
   static esp_err_t handle_battery_display_post(httpd_req_t* request);
   static esp_err_t handle_portal_access_post(httpd_req_t* request);
   static esp_err_t handle_ams_display_post(httpd_req_t* request);
+  static esp_err_t handle_audio_post(httpd_req_t* request);
   static esp_err_t handle_timezone_post(httpd_req_t* request);
   static esp_err_t handle_cloud_connect(httpd_req_t* request);
   static esp_err_t handle_cloud_verify(httpd_req_t* request);
@@ -97,6 +101,7 @@ class SetupPortal {
   P1sCameraClient& camera_client_;
   Ui& ui_;
   const PmuManager& pmu_manager_;
+  AudioNotifier& audio_notifier_;
   httpd_handle_t server_ = nullptr;
   bool reboot_requested_ = false;
   std::mutex access_mutex_{};

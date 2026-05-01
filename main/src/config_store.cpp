@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 #include "esp_check.h"
@@ -242,6 +243,21 @@ bool ConfigStore::load_filament_anim_enabled() const {
   return parse_bool_or_default(load_string("fil_anim"), true);
 }
 
+bool ConfigStore::load_audio_enabled() const {
+  return parse_bool_or_default(load_string("audio_en"), true);
+}
+
+int ConfigStore::load_audio_volume_percent() const {
+  const std::string s = load_string("audio_vol");
+  if (s.empty()) {
+    return 60;
+  }
+  const long parsed = std::strtol(s.c_str(), nullptr, 10);
+  if (parsed < 0) return 0;
+  if (parsed > 100) return 100;
+  return static_cast<int>(parsed);
+}
+
 ArcColorScheme ConfigStore::load_arc_color_scheme() const {
   ArcColorScheme colors;
   colors.printing = parse_color_or_default(load_string("arc_print"), colors.printing);
@@ -338,6 +354,16 @@ esp_err_t ConfigStore::save_filament_wake_enabled(bool enabled) const {
 
 esp_err_t ConfigStore::save_filament_anim_enabled(bool enabled) const {
   return save_string("fil_anim", enabled ? "1" : "0");
+}
+
+esp_err_t ConfigStore::save_audio_enabled(bool enabled) const {
+  return save_string("audio_en", enabled ? "1" : "0");
+}
+
+esp_err_t ConfigStore::save_audio_volume_percent(int volume) const {
+  if (volume < 0) volume = 0;
+  if (volume > 100) volume = 100;
+  return save_string("audio_vol", std::to_string(volume));
 }
 
 std::string ConfigStore::load_timezone_iana() const {

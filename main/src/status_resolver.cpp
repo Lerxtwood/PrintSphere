@@ -497,6 +497,12 @@ void apply_cloud_metrics_bundle(PrinterSnapshot& target, const BambuCloudSnapsho
   if (cloud_snapshot.total_layers > 0U) {
     target.total_layers = cloud_snapshot.total_layers;
   }
+  if (cloud_snapshot.estimated_filament_weight_g > 0.0f) {
+    target.estimated_filament_weight_g = cloud_snapshot.estimated_filament_weight_g;
+  }
+  if (cloud_snapshot.estimated_filament_length_mm > 0.0f) {
+    target.estimated_filament_length_mm = cloud_snapshot.estimated_filament_length_mm;
+  }
   if (target.job_name.empty() && !cloud_snapshot.preview_title.empty()) {
     target.job_name = cloud_snapshot.preview_title;
   }

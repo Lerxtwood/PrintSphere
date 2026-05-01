@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "printsphere/config_store.hpp"
+#include "printsphere/mqtt_telemetry.hpp"
 #include "printsphere/printer_state.hpp"
 
 struct cJSON;
@@ -39,8 +40,20 @@ class PrinterClient {
   // Return a short delay in ms when other network clients need time to unwind.
   void set_pre_local_mqtt_callback(std::function<uint32_t()> cb);
   bool set_chamber_light(bool on);
+  // Pause / resume / stop the running print job. Returns true if the command
+  // was queued for the worker task to publish; false if MQTT is not currently
+  // connected. The publish itself happens on the next worker iteration so this
+  // call never blocks. The caller is expected to apply an optimistic snapshot
+  // override (see Application) which expires after a few seconds if the printer
+  // does not actually transition lifecycle. Pauses / resumes / stops a print
+  // via MQTT topic device/<DEVICE_ID>/request — works in LAN-only mode when
+  // the printer's LAN access code is in use (LAN-only printers behave the same
+  // way as cloud-connected ones for print-control commands).
+  bool set_print_command(PrintCommand command);
   esp_err_t start();
   PrinterSnapshot snapshot() const { return state_.snapshot(); }
+  // Reconnect-storm telemetry snapshot (safe from any task).
+  MqttTelemetry mqtt_telemetry() const;
   struct LocalPrinterRuntimeState {
     PrinterConnectionState connection = PrinterConnectionState::kBooting;
     PrintLifecycleState lifecycle = PrintLifecycleState::kUnknown;
@@ -100,6 +113,8 @@ class PrinterClient {
   void cancel_client_rebuild();
   void process_pending_chamber_light_command();
   bool publish_chamber_light_command(bool on);
+  void process_pending_print_command();
+  bool publish_print_command(PrintCommand command);
   PrinterConnection desired_connection() const;
   void set_waiting_snapshot(const PrinterConnection& connection);
   bool publish_request(const char* payload);
@@ -157,6 +172,9 @@ class PrinterClient {
   std::atomic<bool> reconfigure_requested_{false};
   std::atomic<bool> chamber_light_command_pending_{false};
   std::atomic<bool> chamber_light_command_on_{false};
+  // Pending print-control command (pause/resume/stop) queued from the UI thread
+  // to be published from the network task on its next iteration. kNone = idle.
+  std::atomic<uint8_t> print_command_pending_{static_cast<uint8_t>(PrintCommand::kNone)};
   std::atomic<bool> client_rebuild_requested_{false};
   std::atomic<bool> force_client_rebuild_{false};
   std::atomic<uint32_t> last_message_tick_{0};
@@ -168,6 +186,16 @@ class PrinterClient {
   std::atomic<bool> runtime_dirty_{false};
   uint32_t consecutive_probe_failures_{0};
   uint32_t consecutive_mqtt_errors_{0};
+  // Reconnect-storm telemetry (atomic so the setup-portal HTTP task can read
+  // them without locking the worker mutex). consecutive_mqtt_errors_ above is
+  // the existing per-loop counter; mqtt_total_failures_/successes_ accumulate
+  // since boot and survive reconnect cycles.
+  std::atomic<uint32_t> mqtt_total_failures_{0};
+  std::atomic<uint32_t> mqtt_total_successes_{0};
+  std::atomic<uint64_t> mqtt_last_attempt_ms_{0};
+  std::atomic<uint64_t> mqtt_last_success_ms_{0};
+  std::atomic<uint64_t> mqtt_last_failure_ms_{0};
+  std::atomic<uint32_t> mqtt_current_backoff_ms_{0};
 };
 
 }  // namespace printsphere

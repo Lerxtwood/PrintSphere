@@ -723,6 +723,52 @@ void append_local_status_fields(std::string* body, const PrinterSnapshot& local,
   *body += ",\"local_detail\":\"" + json_escape(local.detail) + "\"";
 }
 
+// Reconnect-storm telemetry — see MqttTelemetry. Emitted with stable JSON keys
+// (mqtt_local_*, mqtt_cloud_*) so the setup-portal status page can render a
+// "last attempt N s ago, M failures" line without polling internal log files.
+void append_mqtt_telemetry_fields(std::string* body, const MqttTelemetry& local,
+                                  const MqttTelemetry& cloud) {
+  if (body == nullptr) {
+    return;
+  }
+  const uint64_t current_ms = now_ms();
+  auto seconds_ago = [current_ms](uint64_t ts_ms) -> int64_t {
+    if (ts_ms == 0 || ts_ms > current_ms) {
+      return -1;
+    }
+    return static_cast<int64_t>((current_ms - ts_ms) / 1000ULL);
+  };
+  auto append = [&](const char* prefix, const MqttTelemetry& t) {
+    *body += ",\"";
+    *body += prefix;
+    *body += "_connected\":";
+    *body += (t.connected ? "true" : "false");
+    *body += ",\"";
+    *body += prefix;
+    *body += "_consecutive_failures\":" + std::to_string(t.consecutive_failures);
+    *body += ",\"";
+    *body += prefix;
+    *body += "_total_failures\":" + std::to_string(t.total_failures);
+    *body += ",\"";
+    *body += prefix;
+    *body += "_total_successes\":" + std::to_string(t.total_successes);
+    *body += ",\"";
+    *body += prefix;
+    *body += "_current_backoff_ms\":" + std::to_string(t.current_backoff_ms);
+    *body += ",\"";
+    *body += prefix;
+    *body += "_last_attempt_s_ago\":" + std::to_string(seconds_ago(t.last_attempt_ms));
+    *body += ",\"";
+    *body += prefix;
+    *body += "_last_success_s_ago\":" + std::to_string(seconds_ago(t.last_success_ms));
+    *body += ",\"";
+    *body += prefix;
+    *body += "_last_failure_s_ago\":" + std::to_string(seconds_ago(t.last_failure_ms));
+  };
+  append("mqtt_local", local);
+  append("mqtt_cloud", cloud);
+}
+
 }  // namespace
 
 void SetupPortal::request_unlock_pin() {
@@ -1089,6 +1135,14 @@ esp_err_t SetupPortal::start() {
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &timezone_uri), kTag,
                       "timezone handler failed");
 
+  httpd_uri_t audio_uri = {};
+  audio_uri.uri = "/api/audio";
+  audio_uri.method = HTTP_POST;
+  audio_uri.handler = &SetupPortal::handle_audio_post;
+  audio_uri.user_ctx = this;
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &audio_uri), kTag,
+                      "audio handler failed");
+
   httpd_uri_t cloud_connect_uri = {};
   cloud_connect_uri.uri = "/api/cloud/connect";
   cloud_connect_uri.method = HTTP_POST;
@@ -1215,6 +1269,8 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   const bool portal_lock_enabled = portal->config_store_.load_portal_lock_enabled();
   const bool filament_wake = portal->config_store_.load_filament_wake_enabled();
   const bool filament_anim = portal->config_store_.load_filament_anim_enabled();
+  const bool audio_enabled_cfg = portal->config_store_.load_audio_enabled();
+  const int audio_volume_cfg = portal->config_store_.load_audio_volume_percent();
   const PrinterProfile active_profile = portal->config_store_.load_active_printer_profile();
   const PrinterConnection printer = active_profile.to_connection();
   const ArcColorScheme arc_colors = portal->config_store_.load_arc_color_scheme();
@@ -1614,7 +1670,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
     html += ">CN</option></select></div>";
     html += "<div class=\"hint-box\"><strong>Printer Status:</strong> <span id=\"cloud-detail\">";
     html += json_escape(cloud_snapshot.detail);
-    html += "</span></div>";
+    html += "</span><div class=\"micro\" id=\"mqtt-cloud-telemetry\" style=\"margin-top:4px;color:#666;\"></div></div>";
     html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"cloud-connect-button\">Connect Cloud</button>";
     html += "<div class=\"micro\">This saves the cloud credentials immediately. In Hybrid and Cloud only it also starts the login without rebooting.</div></div>";
     html += "<div class=\"grid-2\">";
@@ -1652,7 +1708,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
     html += "\" autocomplete=\"off\"></div>";
     html += "<div class=\"hint-box\"><strong>Local Status:</strong> <span id=\"local-detail\">";
     html += json_escape(local_snapshot.detail);
-    html += "</span></div>";
+    html += "</span><div class=\"micro\" id=\"mqtt-local-telemetry\" style=\"margin-top:4px;color:#666;\"></div></div>";
     html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"local-connect-button\">Connect Local</button>";
     html += "<div class=\"micro\">This saves the local printer credentials immediately. In Hybrid and Local only it also reconnects MQTT and camera without rebooting.</div></div>";
     html += "<p class=\"micro\">In Hybrid mode PrintSphere auto-picks the better status path for your printer and still uses the local camera when available.</p>";
@@ -1891,6 +1947,39 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
     html += "<div class=\"actions\"><button type=\"button\" class=\"primary hidden\" id=\"ams-display-apply-button\">Apply + Restart</button>";
     html += "<div class=\"micro hidden\" id=\"ams-display-apply-hint\">AMS display settings apply after the ESP restarts.</div></div>";
     end_settings_panel();
+
+    {
+      const std::string audio_badge_value = audio_enabled_cfg
+          ? (std::to_string(audio_volume_cfg) + "%")
+          : std::string("Off");
+      const char* audio_badge_class = audio_enabled_cfg ? "info" : "idle";
+      begin_settings_panel(
+          "Sound Notifications",
+          "Short tones for print start, finish, errors and HMS warnings via the on-board speaker.",
+          audio_badge_value, audio_badge_class, false);
+      html += "<div class=\"field\"><label for=\"audio_enabled\">Sound</label><select id=\"audio_enabled\">";
+      html += "<option value=\"true\"";
+      if (audio_enabled_cfg) {
+        html += " selected";
+      }
+      html += ">Enabled</option>";
+      html += "<option value=\"false\"";
+      if (!audio_enabled_cfg) {
+        html += " selected";
+      }
+      html += ">Muted</option></select></div>";
+      html += "<div class=\"field\"><label for=\"audio_volume\">Volume (";
+      html += "<span id=\"audio_volume_value\">";
+      html += std::to_string(audio_volume_cfg);
+      html += "%</span>)</label>";
+      html += "<input type=\"range\" id=\"audio_volume\" min=\"0\" max=\"100\" step=\"5\" value=\"";
+      html += std::to_string(audio_volume_cfg);
+      html += "\" oninput=\"document.getElementById('audio_volume_value').textContent=this.value+'%';\"></div>";
+      html += "<div class=\"actions\"><button type=\"button\" class=\"primary\" id=\"audio-apply-button\">Save</button>";
+      html += "<button type=\"button\" id=\"audio-test-button\">Test sound</button>";
+      html += "<div class=\"micro\" id=\"audio-apply-hint\">Applies live, no restart required.</div></div>";
+      end_settings_panel();
+    }
 
     {
       const std::string saved_tz = portal->config_store_.load_timezone_iana();
@@ -2402,6 +2491,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "const sourceValue=sourceMode==='local_only'?'Local only':(sourceMode==='cloud_only'?'Cloud only':'Hybrid (recommended)');"
           "setBadge('source-badge','Source',sourceValue,'info');"
           "renderLocalStatus(body);"
+          "renderMqttTelemetry(body);"
           "if(Date.now()>statusLockUntil){"
           "if(body.wifi_connected){const setupDone=(body.cloud_configured||body.local_configured)&&(!body.cloud_configured||body.cloud_portal_ready||(!body.cloud_verification_required&&!body.cloud_tfa_required&&cloudSetupStage(body)!=='failed'))&&(!body.local_configured||!body.local_error);if(setupDone){setStatus('','',0);}else if(body.cloud_status_line){setStatus(body.cloud_status_line,body.cloud_status_detail||body.cloud_detail||body.detail||'',0);}"
           "else{const stage=cloudSetupStage(body);setStatus(trimmedValue('cloud_email')||body.cloud_connected||cloudStageIsCodeRequired(stage)||cloudStageIsBusy(stage)?'Connect Bambu Cloud':'Setup ready',body.cloud_detail||body.detail||('ESP on home network: '+(body.wifi_ip||'')),0);}}"
@@ -2442,6 +2532,29 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "else if(Date.now()<localFollowupUntil&&localFollowupDetail){localDetail.textContent=localFollowupDetail;}"
           "else{localDetail.textContent='No local response yet';}}"
           "if(body&&(body.local_connected||body.local_error)){stopLocalFollowup();}}";
+  html += "function fmtAgo(s){if(s===undefined||s===null||s<0)return 'never';if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m '+(s%60)+'s ago';return Math.floor(s/3600)+'h ago';}";
+  html += "function renderMqttTelemetry(body){"
+          "function fillBox(id,prefix){var el=document.getElementById(id);if(!el)return;"
+          "if(!body||body[prefix+'_total_failures']===undefined){el.textContent='';return;}"
+          "var connected=!!body[prefix+'_connected'];"
+          "var fails=body[prefix+'_total_failures']||0;"
+          "var consec=body[prefix+'_consecutive_failures']||0;"
+          "var attempt=body[prefix+'_last_attempt_s_ago'];"
+          "var success=body[prefix+'_last_success_s_ago'];"
+          "var failure=body[prefix+'_last_failure_s_ago'];"
+          "var backoff=body[prefix+'_current_backoff_ms']||0;"
+          "var parts=[];"
+          "parts.push(connected?'\\u25CF connected':'\\u25CB disconnected');"
+          "parts.push('last attempt '+fmtAgo(attempt));"
+          "if(connected){parts.push('up since '+fmtAgo(success));}"
+          "else{parts.push('last ok '+fmtAgo(success));}"
+          "parts.push(fails+' failure'+(fails===1?'':'s')+' total');"
+          "if(consec>0){parts.push(consec+' consecutive');}"
+          "if(failure>=0){parts.push('last fail '+fmtAgo(failure));}"
+          "if(backoff>0){parts.push('backoff '+(backoff>=1000?Math.round(backoff/1000)+'s':backoff+'ms'));}"
+          "el.textContent=parts.join(' \\u2022 ');}"
+          "fillBox('mqtt-local-telemetry','mqtt_local');"
+          "fillBox('mqtt-cloud-telemetry','mqtt_cloud');}";
   html += "function startLocalFollowup(detail,timeoutMs){"
           "localFollowupDetail=detail||'Saving printer credentials and connecting to local MQTT now.';"
           "localFollowupUntil=Date.now()+(timeoutMs||12000);"
@@ -2614,6 +2727,28 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "if(response.ok){savedConfig.tz_iana=tz_iana;tzUpdateControls();setStatus('Time zone saved.','Local time is now '+(tz_iana||'UTC')+'.',4000);}"
           "else{setStatus(body.error||'Time zone change failed','The new time zone could not be saved.',6000);tzApply.disabled=false;tzUpdateControls();}}"
           "catch(error){setStatus('Time zone change failed','The request to the ESP could not be completed.',6000);tzApply.disabled=false;tzUpdateControls();}});}}";
+  // Sound notifications panel: enable/volume save + live test button. Applies
+  // without restart so the button feedback is immediate.
+  html += "{const audioEnabledSel=document.getElementById('audio_enabled');"
+          "const audioVolumeRange=document.getElementById('audio_volume');"
+          "const audioApply=document.getElementById('audio-apply-button');"
+          "const audioTest=document.getElementById('audio-test-button');"
+          "async function audioPost(payload){const response=await fetch('/api/audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
+              "const body=await response.json().catch(()=>({}));return{ok:response.ok,body};}"
+          "if(audioApply){audioApply.addEventListener('click',async()=>{"
+              "const audio_enabled=audioEnabledSel?audioEnabledSel.value==='true':true;"
+              "const audio_volume=audioVolumeRange?Number(audioVolumeRange.value):60;"
+              "audioApply.disabled=true;setStatus('Saving sound...','Applying notification sound settings.',4000);"
+              "const r=await audioPost({audio_enabled,audio_volume,test:false}).catch(()=>({ok:false,body:{}}));"
+              "if(r.ok){savedConfig.audio_enabled=audio_enabled;savedConfig.audio_volume=audio_volume;setStatus('Sound saved.','',2500);}"
+              "else{setStatus(r.body.error||'Sound change failed','Sound settings could not be saved.',6000);}"
+              "audioApply.disabled=false;});}"
+          "if(audioTest){audioTest.addEventListener('click',async()=>{"
+              "const audio_enabled=audioEnabledSel?audioEnabledSel.value==='true':true;"
+              "const audio_volume=audioVolumeRange?Number(audioVolumeRange.value):60;"
+              "audioTest.disabled=true;"
+              "await audioPost({audio_enabled,audio_volume,test:true}).catch(()=>{});"
+              "setTimeout(()=>{audioTest.disabled=false;},900);});}}";
   html += "if(batDimSelect){batDimSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batDimBrightnessSelect){batDimBrightnessSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batOffSelect){batOffSelect.addEventListener('change',updateBatDisplayControls);}";
@@ -2959,6 +3094,8 @@ esp_err_t SetupPortal::handle_health(httpd_req_t* request) {
     const PrinterSnapshot local = portal->printer_client_.snapshot();
     append_cloud_status_fields(&body, cloud);
     append_local_status_fields(&body, local, portal->printer_client_.is_configured());
+    append_mqtt_telemetry_fields(&body, portal->printer_client_.mqtt_telemetry(),
+                                 portal->cloud_client_.mqtt_telemetry());
   }
   body += "}";
 
@@ -3150,6 +3287,8 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   const PrinterSnapshot local_snapshot = portal->printer_client_.snapshot();
   append_cloud_status_fields(&body, cloud_snapshot);
   append_local_status_fields(&body, local_snapshot, portal->printer_client_.is_configured());
+  append_mqtt_telemetry_fields(&body, portal->printer_client_.mqtt_telemetry(),
+                               portal->cloud_client_.mqtt_telemetry());
   body += ",\"arc_printing\":\"" + color_to_html_hex(arc_colors.printing) + "\"";
   body += ",\"arc_done\":\"" + color_to_html_hex(arc_colors.done) + "\"";
   body += ",\"arc_error\":\"" + color_to_html_hex(arc_colors.error) + "\"";
@@ -3173,6 +3312,10 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   body += portal->config_store_.load_filament_wake_enabled() ? "true" : "false";
   body += ",\"filament_anim\":";
   body += portal->config_store_.load_filament_anim_enabled() ? "true" : "false";
+  body += ",\"audio_enabled\":";
+  body += portal->config_store_.load_audio_enabled() ? "true" : "false";
+  body += ",\"audio_volume\":";
+  body += std::to_string(portal->config_store_.load_audio_volume_percent());
   body += ",\"tz_iana\":\"" + json_escape(portal->config_store_.load_timezone_iana()) + "\"";
   body += "}";
 
@@ -3601,6 +3744,54 @@ esp_err_t SetupPortal::handle_timezone_post(httpd_req_t* request) {
                       "save timezone failed");
   // Apply immediately — no reboot required for localtime_r() consumers.
   time_sync::set_timezone_iana(tz_iana);
+
+  send_json(request, "{\"status\":\"saved\"}");
+  return ESP_OK;
+}
+
+esp_err_t SetupPortal::handle_audio_post(httpd_req_t* request) {
+  auto* portal = static_cast<SetupPortal*>(request->user_ctx);
+  if (portal == nullptr) {
+    return ESP_FAIL;
+  }
+  if (!portal->is_request_authorized(request)) {
+    return portal->send_locked_response(request);
+  }
+
+  cJSON* root = nullptr;
+  esp_err_t parse_err = receive_json_body(request, &root);
+  if (parse_err != ESP_OK) {
+    return parse_err;
+  }
+
+  const bool audio_enabled =
+      read_bool_field(root, "audio_enabled", portal->config_store_.load_audio_enabled());
+  int audio_volume = portal->config_store_.load_audio_volume_percent();
+  {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, "audio_volume");
+    if (cJSON_IsNumber(item)) {
+      const long v = static_cast<long>(item->valuedouble);
+      if (v >= 0 && v <= 100) {
+        audio_volume = static_cast<int>(v);
+      }
+    }
+  }
+  const bool play_test = read_bool_field(root, "test", false);
+  cJSON_Delete(root);
+
+  ESP_LOGI(kTag, "Saving audio: enabled=%d volume=%d test=%d",
+           audio_enabled, audio_volume, play_test);
+  ESP_RETURN_ON_ERROR(portal->config_store_.save_audio_enabled(audio_enabled), kTag,
+                      "save audio enabled failed");
+  ESP_RETURN_ON_ERROR(portal->config_store_.save_audio_volume_percent(audio_volume), kTag,
+                      "save audio volume failed");
+
+  // Apply live without reboot — runtime-tunable.
+  portal->audio_notifier_.set_enabled(audio_enabled);
+  portal->audio_notifier_.set_volume_percent(audio_volume);
+  if (play_test) {
+    portal->audio_notifier_.play_test();
+  }
 
   send_json(request, "{\"status\":\"saved\"}");
   return ESP_OK;

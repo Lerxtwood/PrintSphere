@@ -23,6 +23,10 @@ constexpr TickType_t kLocalMqttHandoffCooldown = pdMS_TO_TICKS(3000);
 constexpr TickType_t kScreenOffTouchWakePollSlice = pdMS_TO_TICKS(25);
 constexpr TickType_t kUiCommandWakePollSlice = pdMS_TO_TICKS(50);
 constexpr uint64_t kChamberLightOverrideMs = 6000;
+// Pause/resume/stop optimistic-state window. Most printers reflect the new
+// lifecycle in their next status report (sub-second). 5 s is a safety net so
+// the button doesn't lock forever if the command is silently dropped.
+constexpr uint64_t kPrintCommandOverrideMs = 5000;
 
 esp_err_t configure_power_management() {
 #if CONFIG_PM_ENABLE
@@ -122,10 +126,60 @@ void mark_chamber_light_state(BambuCloudSnapshot& snapshot, bool on) {
   snapshot.chamber_light_on = on;
 }
 
+// Decide whether a print-control command should be issued via the local broker,
+// the cloud broker, or both. Mirrors the chamber-light routing but does not
+// gate on chamber-light capability — pause/resume/stop is universal.
+struct PrintCommandPlan {
+  bool try_local = false;
+  bool try_cloud = false;
+};
+
+PrintCommandPlan print_command_plan(SourceMode source_mode, bool hybrid_prefers_cloud,
+                                    bool hybrid_local_status_supported_now,
+                                    bool local_network_ready, bool local_printer_enabled,
+                                    bool cloud_network_ready,
+                                    const PrinterSnapshot& local_snapshot,
+                                    const BambuCloudSnapshot& cloud_snapshot) {
+  PrintCommandPlan plan;
+  switch (source_mode) {
+    case SourceMode::kLocalOnly:
+      plan.try_local = true;
+      break;
+    case SourceMode::kCloudOnly:
+      plan.try_cloud = true;
+      break;
+    case SourceMode::kHybrid:
+    default:
+      plan.try_local = !hybrid_prefers_cloud && hybrid_local_status_supported_now &&
+                       local_network_ready && local_printer_enabled &&
+                       local_snapshot.local_connected;
+      plan.try_cloud = cloud_network_ready && cloud_snapshot.connected;
+      break;
+  }
+  return plan;
+}
+
+// Resolve the printer lifecycle state implied by a freshly issued print
+// command. Pause -> Paused, Resume -> Printing, Stop -> Idle. Used to drive
+// the optimistic UI override until the next status report arrives.
+PrintLifecycleState lifecycle_after_print_command(PrintCommand cmd) {
+  switch (cmd) {
+    case PrintCommand::kPause:
+      return PrintLifecycleState::kPaused;
+    case PrintCommand::kResume:
+      return PrintLifecycleState::kPrinting;
+    case PrintCommand::kStop:
+      return PrintLifecycleState::kIdle;
+    case PrintCommand::kNone:
+    default:
+      return PrintLifecycleState::kUnknown;
+  }
+}
+
 void wait_for_next_iteration(Ui& ui, TickType_t delay) {
   TickType_t remaining = delay;
   while (remaining > 0) {
-    if (ui.has_chamber_light_toggle_request()) {
+    if (ui.has_chamber_light_toggle_request() || ui.has_print_command_request()) {
       break;
     }
     const bool touch_wake_poll_active = ui.screen_power_mode() == ScreenPowerMode::kOff;
@@ -138,7 +192,7 @@ void wait_for_next_iteration(Ui& ui, TickType_t delay) {
     vTaskDelay(slice);
     remaining -= slice;
 
-    if (ui.has_chamber_light_toggle_request()) {
+    if (ui.has_chamber_light_toggle_request() || ui.has_print_command_request()) {
       break;
     }
     if (touch_wake_poll_active && gpio_get_level(BSP_LCD_TOUCH_INT) == 0) {
@@ -154,7 +208,7 @@ void wait_for_next_iteration(Ui& ui, TickType_t delay) {
 
 Application::Application()
     : setup_portal_(config_store_, wifi_manager_, cloud_client_, printer_client_, camera_client_,
-                    ui_, pmu_manager_) {
+                    ui_, pmu_manager_, audio_notifier_) {
   cloud_client_.set_config_store(&config_store_);
   // Route printer online/offline events from the Bambu Cloud MQTT feed to the
   // local PrinterClient so it can collapse its reconnect backoff the moment the
@@ -204,6 +258,11 @@ void Application::run() {
   ui_.set_battery_display_policy(config_store_.load_battery_display_policy());
   filament_wake_enabled_ = config_store_.load_filament_wake_enabled();
   filament_anim_enabled_ = config_store_.load_filament_anim_enabled();
+  audio_notifier_.set_enabled(config_store_.load_audio_enabled());
+  audio_notifier_.set_volume_percent(config_store_.load_audio_volume_percent());
+  if (audio_notifier_.initialize() != ESP_OK) {
+    ESP_LOGW(kTag, "Audio notifier init failed - sound disabled this boot");
+  }
   ESP_ERROR_CHECK(ui_.initialize());
   if (!initialize_error_lookup_storage()) {
     ESP_LOGW(kTag, "Embedded error lookup unavailable; falling back to generic error text");
@@ -431,8 +490,26 @@ void Application::run() {
       target_snapshot->chamber_light_state_known = true;
       target_snapshot->chamber_light_on = chamber_light_override_on_;
     };
+    auto apply_print_command_override = [&](PrinterSnapshot* target_snapshot) {
+      if (target_snapshot == nullptr ||
+          print_command_override_kind_ == PrintCommand::kNone) {
+        return;
+      }
+      const PrintLifecycleState desired =
+          lifecycle_after_print_command(print_command_override_kind_);
+      // Clear early once the printer's actual lifecycle confirms the command.
+      if (target_snapshot->lifecycle == desired || now_ms >= print_command_override_until_ms_) {
+        print_command_override_kind_ = PrintCommand::kNone;
+        print_command_override_until_ms_ = 0;
+        target_snapshot->print_command_pending_kind = PrintCommand::kNone;
+        return;
+      }
+      target_snapshot->lifecycle = desired;
+      target_snapshot->print_command_pending_kind = print_command_override_kind_;
+    };
     PrinterSnapshot snapshot = build_merged_snapshot(local_snapshot, cloud_snapshot);
     apply_chamber_light_override(&snapshot);
+    apply_print_command_override(&snapshot);
 
     if (ui_.consume_chamber_light_toggle_request()) {
       const bool requested_on =
@@ -465,6 +542,34 @@ void Application::run() {
         chamber_light_override_until_ms_ = now_ms + kChamberLightOverrideMs;
         snapshot = build_merged_snapshot(local_snapshot, cloud_snapshot);
         apply_chamber_light_override(&snapshot);
+      }
+    }
+
+    if (const PrintCommand requested_print_cmd = ui_.consume_print_command_request();
+        requested_print_cmd != PrintCommand::kNone) {
+      bool command_sent = false;
+      const PrintCommandPlan plan = print_command_plan(
+          source_mode_, hybrid_prefers_cloud, hybrid_local_status_supported_now,
+          local_network_ready, local_printer_enabled_, cloud_network_ready, local_snapshot,
+          cloud_snapshot);
+      if (plan.try_local) {
+        command_sent = printer_client_.set_print_command(requested_print_cmd);
+      }
+      if (!command_sent && plan.try_cloud) {
+        command_sent = cloud_client_.set_print_command(requested_print_cmd);
+      }
+
+      if (!command_sent) {
+        ESP_LOGW(kTag, "Print command %s failed in %s mode", to_string(requested_print_cmd),
+                 to_string(source_mode_));
+      } else {
+        ESP_LOGI(kTag, "Print command %s issued (%s)", to_string(requested_print_cmd),
+                 to_string(source_mode_));
+        print_command_override_kind_ = requested_print_cmd;
+        print_command_override_until_ms_ = now_ms + kPrintCommandOverrideMs;
+        snapshot = build_merged_snapshot(local_snapshot, cloud_snapshot);
+        apply_chamber_light_override(&snapshot);
+        apply_print_command_override(&snapshot);
       }
     }
 
@@ -519,6 +624,44 @@ void Application::run() {
                                 portal_access.pin_active, portal_access.pin_code,
                                 portal_access.pin_remaining_s, portal_access.session_remaining_s);
     ui_.apply_snapshot(snapshot);
+    // Audio-notification edge detection. Runs strictly off the merged
+    // PrinterSnapshot so it sees the same view that the UI does - no double
+    // beeps when cloud and local report the same transition.
+    {
+      const PrintLifecycleState lc = snapshot.lifecycle;
+      const bool has_err = snapshot.has_error;
+      const int err_code = snapshot.print_error_code;
+      const size_t hms_count = snapshot.hms_codes.size();
+      if (audio_state_primed_) {
+        if (lc != audio_last_lifecycle_) {
+          if (lc == PrintLifecycleState::kFinished &&
+              audio_last_lifecycle_ == PrintLifecycleState::kPrinting) {
+            audio_notifier_.play(AudioNotifier::Event::kPrintFinished);
+          } else if (lc == PrintLifecycleState::kPrinting &&
+                     (audio_last_lifecycle_ == PrintLifecycleState::kIdle ||
+                      audio_last_lifecycle_ == PrintLifecycleState::kPreparing ||
+                      audio_last_lifecycle_ == PrintLifecycleState::kUnknown)) {
+            audio_notifier_.play(AudioNotifier::Event::kPrintStarted);
+          } else if (lc == PrintLifecycleState::kPaused &&
+                     audio_last_lifecycle_ == PrintLifecycleState::kPrinting) {
+            audio_notifier_.play(AudioNotifier::Event::kPrintPaused);
+          } else if (lc == PrintLifecycleState::kError &&
+                     audio_last_lifecycle_ != PrintLifecycleState::kError) {
+            audio_notifier_.play(AudioNotifier::Event::kPrintError);
+          }
+        } else if ((has_err && !audio_last_has_error_) ||
+                   (err_code != 0 && err_code != audio_last_print_error_code_)) {
+          audio_notifier_.play(AudioNotifier::Event::kPrintError);
+        } else if (hms_count > audio_last_hms_count_) {
+          audio_notifier_.play(AudioNotifier::Event::kHmsAlert);
+        }
+      }
+      audio_last_lifecycle_ = lc;
+      audio_last_has_error_ = has_err;
+      audio_last_print_error_code_ = err_code;
+      audio_last_hms_count_ = hms_count;
+      audio_state_primed_ = true;
+    }
     last_local_print_live_ = local_print_is_live(local_snapshot);
     last_cloud_print_live_ = cloud_print_is_live(cloud_snapshot);
 

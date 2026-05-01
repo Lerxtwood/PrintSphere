@@ -9,6 +9,7 @@
 #include <ctime>
 #include <string>
 
+#include "sdkconfig.h"
 #include "misc/cache/instance/lv_image_cache.h"
 #include "bsp/esp32_s3_touch_amoled_1_75.h"
 #include "esp_check.h"
@@ -39,10 +40,22 @@ constexpr size_t kImagePersistentReserveBytes = 20U * 1024U;
 constexpr int kDefaultBrightnessPercent = 80;
 constexpr int kRingStrokeWidth = 22;
 constexpr int kRemainingRowY = 172;
+// Page-2 preview cover layout. The compact layout (240 px cover, lifted up
+// to make room for two print-control buttons below) is only used when the
+// experimental print-control buttons are compiled in. The default build keeps
+// the original full-size cover layout (320 px, centered) to preserve the
+// look-and-feel of releases prior to v1.6-rc1.
+#if CONFIG_PRINTSPHERE_EXPERIMENTAL_PRINT_CONTROL
+constexpr int kPage2PreviewSize = 240;
+constexpr int kPage2PreviewYOffset = -90;
+constexpr int kPage2NoteWithImageY = 56;
+constexpr int kPage2SubnoteWithImageY = 60;
+#else
 constexpr int kPage2PreviewSize = 320;
 constexpr int kPage2PreviewYOffset = -12;
 constexpr int kPage2NoteWithImageY = 138;
 constexpr int kPage2SubnoteWithImageY = 188;
+#endif
 constexpr int kPage3CameraWidth = 400;
 constexpr int kPage3CameraHeight = 224;
 constexpr int kPage3CameraYOffset = 0;
@@ -876,6 +889,14 @@ std::string detail_text(const PrinterSnapshot& snapshot) {
   if (snapshot.has_error && !snapshot.detail.empty()) {
     return snapshot.detail;
   }
+  // HMS warnings (codes present but `has_error` not flagged) should also win
+  // over the job name so the user sees the full TSV-resolved message — e.g.
+  // "MQTT Command verification failed..." after using a print-control button —
+  // instead of just the filename of the running job.
+  if ((!snapshot.hms_codes.empty() || snapshot.hms_alert_count > 0) &&
+      !snapshot.detail.empty() && snapshot.detail != snapshot.stage) {
+    return snapshot.detail;
+  }
   if (!snapshot.job_name.empty() &&
       (snapshot.lifecycle == PrintLifecycleState::kPreparing ||
        snapshot.lifecycle == PrintLifecycleState::kPrinting ||
@@ -901,7 +922,21 @@ std::string layer_text(const PrinterSnapshot& snapshot) {
   } else {
     std::snprintf(buffer, sizeof(buffer), "Layer: -- / --");
   }
-  return buffer;
+  std::string text = buffer;
+  // Append slicer filament estimate when the cloud task descriptor exposes it.
+  // Format compactly so it fits next to the layer counter on the 320 px label.
+  if (snapshot.estimated_filament_weight_g > 0.0f) {
+    char fila[24] = {};
+    if (snapshot.estimated_filament_weight_g >= 1000.0f) {
+      std::snprintf(fila, sizeof(fila), "  ~%.2fkg",
+                    snapshot.estimated_filament_weight_g / 1000.0f);
+    } else {
+      std::snprintf(fila, sizeof(fila), "  ~%.0fg",
+                    snapshot.estimated_filament_weight_g);
+    }
+    text += fila;
+  }
+  return text;
 }
 
 std::string remaining_text(const PrinterSnapshot& snapshot) {
@@ -1249,6 +1284,12 @@ bool Ui::consume_camera_refresh_request() {
 
 bool Ui::consume_chamber_light_toggle_request() {
   return chamber_light_toggle_requested_.exchange(false);
+}
+
+PrintCommand Ui::consume_print_command_request() {
+  const uint8_t value =
+      print_command_request_.exchange(static_cast<uint8_t>(PrintCommand::kNone));
+  return static_cast<PrintCommand>(value);
 }
 
 bool Ui::consume_portal_unlock_request() {
@@ -1820,8 +1861,24 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
   detail_visible_ = !detail.empty();
   if (detail_visible_) {
+    // Scroll long error / HMS messages so the full TSV-resolved text is
+    // readable on the narrow label.  Warnings (HMS codes without `has_error`)
+    // also scroll: the user otherwise only sees a wrapped/truncated bare
+    // code where the lookup text would not fit on a single line.
+    const bool has_hms_or_error = snapshot.has_error ||
+                                  snapshot.print_error_code != 0 ||
+                                  !snapshot.hms_codes.empty() ||
+                                  snapshot.hms_alert_count > 0;
+    // LVGL's circular-scroll long mode triggers continuous widget invalidation
+    // for the running marquee animation. That work happens regardless of the
+    // detail label being on screen, so on the AMS / preview pages it just
+    // burns LVGL-lock time. Only enable scrolling when the main page is
+    // actually settled in front of the user — every other state falls back
+    // to the cheaper LV_LABEL_LONG_WRAP, which renders once and is silent.
+    const bool main_page_visible = !scrolling_ && active_page_ == kPageIdxMain;
     const lv_label_long_mode_t desired_mode =
-        snapshot.has_error ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_WRAP;
+        (has_hms_or_error && main_page_visible) ? LV_LABEL_LONG_SCROLL_CIRCULAR
+                                                 : LV_LABEL_LONG_WRAP;
     if (lv_label_get_long_mode(detail_label_) != desired_mode) {
       lv_label_set_long_mode(detail_label_, desired_mode);
     }
@@ -1962,6 +2019,22 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   if (!preview_subnote.empty()) {
     set_label_text_if_changed(page2_subnote_, preview_subnote);
   }
+  // Mirror the gating logic from detail_label_: only run the marquee
+  // animation when page 2 is actually settled and visible. On every other
+  // page the subnote contributes nothing yet still triggers per-frame
+  // widget invalidations under SCROLL_CIRCULAR. Switching to WRAP when the
+  // user is on a different page eliminates that idle-time lock pressure.
+  {
+    const bool preview_visible =
+        !scrolling_ && active_page_ == kPageIdxPreview && !preview_subnote.empty();
+    const lv_label_long_mode_t desired =
+        preview_visible ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_WRAP;
+    if (lv_label_get_long_mode(page2_subnote_) != desired) {
+      lv_label_set_long_mode(page2_subnote_, desired);
+    }
+  }
+
+  update_print_buttons_locked(snapshot);
 
   bool has_camera_image =
       camera_slot_initialized_ && camera_blobs_[active_camera_slot_] &&
@@ -2942,6 +3015,49 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_add_flag(page2_subnote_, LV_OBJ_FLAG_HIDDEN);
   enable_touch_bubble(page2_subnote_);
 
+  // Print-control buttons (pause/resume + stop). Only compiled in when the
+  // experimental print-control feature is enabled via Kconfig. See the help
+  // text of CONFIG_PRINTSPHERE_EXPERIMENTAL_PRINT_CONTROL for background on
+  // why this is opt-in. When disabled, page2_pause_button_/page2_stop_button_
+  // stay nullptr and update_print_buttons_locked() becomes a no-op.
+#if CONFIG_PRINTSPHERE_EXPERIMENTAL_PRINT_CONTROL
+  auto style_print_button = [&](lv_obj_t* button, lv_color_t bg) {
+    lv_obj_set_size(button, 96, 64);
+    lv_obj_set_style_radius(button, 14, 0);
+    lv_obj_set_style_bg_color(button, bg, 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(button, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_opa(button, LV_OPA_30, 0);
+    lv_obj_set_style_border_width(button, 1, 0);
+    lv_obj_set_style_shadow_width(button, 0, 0);
+    lv_obj_set_style_pad_all(button, 0, 0);
+    lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_HIDDEN);
+  };
+
+  page2_pause_button_ = lv_obj_create(page2_);
+  style_print_button(page2_pause_button_, lv_color_hex(0x1F6F4A));
+  lv_obj_align(page2_pause_button_, LV_ALIGN_CENTER, -64, 110);
+  lv_obj_add_event_cb(page2_pause_button_, &Ui::pause_button_event_cb, LV_EVENT_CLICKED, this);
+  page2_pause_button_label_ = lv_label_create(page2_pause_button_);
+  lv_obj_center(page2_pause_button_label_);
+  lv_obj_set_style_text_color(page2_pause_button_label_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(page2_pause_button_label_, info20, 0);
+  set_label_text_if_changed(page2_pause_button_label_, LV_SYMBOL_PAUSE);
+
+  page2_stop_button_ = lv_obj_create(page2_);
+  style_print_button(page2_stop_button_, lv_color_hex(0x8E2A2A));
+  lv_obj_align(page2_stop_button_, LV_ALIGN_CENTER, 64, 110);
+  // Stop requires a long press (~1.5 s default) to commit — guards against
+  // accidental cancellation. A short tap is intentionally a no-op.
+  lv_obj_add_event_cb(page2_stop_button_, &Ui::stop_button_event_cb, LV_EVENT_LONG_PRESSED, this);
+  page2_stop_button_label_ = lv_label_create(page2_stop_button_);
+  lv_obj_center(page2_stop_button_label_);
+  lv_obj_set_style_text_color(page2_stop_button_label_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(page2_stop_button_label_, info20, 0);
+  set_label_text_if_changed(page2_stop_button_label_, LV_SYMBOL_STOP);
+#endif  // CONFIG_PRINTSPHERE_EXPERIMENTAL_PRINT_CONTROL
+
   page3_image_ = lv_image_create(page3_);
   lv_obj_set_size(page3_image_, board::kDisplayWidth, kPage3CameraHeight);
   lv_image_set_inner_align(page3_image_, LV_IMAGE_ALIGN_CENTER);
@@ -3455,6 +3571,79 @@ void Ui::handle_logo_event(lv_event_t* event) {
   chamber_light_toggle_requested_.store(true);
 }
 
+void Ui::handle_pause_button_event(lv_event_t* event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+    return;
+  }
+  if (scrolling_) {
+    return;
+  }
+  // Translate the tap based on the current lifecycle: Printing -> pause,
+  // Paused -> resume. Preparing/Idle/Finished/Error don't expose the button.
+  PrintCommand command = PrintCommand::kNone;
+  switch (last_snapshot_.lifecycle) {
+    case PrintLifecycleState::kPrinting:
+    case PrintLifecycleState::kPreparing:
+      command = PrintCommand::kPause;
+      break;
+    case PrintLifecycleState::kPaused:
+      command = PrintCommand::kResume;
+      break;
+    default:
+      return;
+  }
+  note_activity(false);
+  print_command_request_.store(static_cast<uint8_t>(command));
+}
+
+void Ui::handle_stop_button_event(lv_event_t* event) {
+  if (lv_event_get_code(event) != LV_EVENT_LONG_PRESSED) {
+    return;
+  }
+  if (scrolling_) {
+    return;
+  }
+  // Stop is only meaningful while a job exists (printing / paused / preparing).
+  switch (last_snapshot_.lifecycle) {
+    case PrintLifecycleState::kPrinting:
+    case PrintLifecycleState::kPaused:
+    case PrintLifecycleState::kPreparing:
+      break;
+    default:
+      return;
+  }
+  note_activity(false);
+  print_command_request_.store(static_cast<uint8_t>(PrintCommand::kStop));
+}
+
+void Ui::update_print_buttons_locked(const PrinterSnapshot& snapshot) {
+  if (page2_pause_button_ == nullptr || page2_stop_button_ == nullptr) {
+    return;
+  }
+  // Only show controls on the cloud/hybrid Preview page when a job is active.
+  const bool job_active = snapshot.lifecycle == PrintLifecycleState::kPrinting ||
+                          snapshot.lifecycle == PrintLifecycleState::kPaused ||
+                          snapshot.lifecycle == PrintLifecycleState::kPreparing;
+  const bool show = snapshot.preview_page_available && job_active;
+  set_hidden(page2_pause_button_, !show);
+  set_hidden(page2_stop_button_, !show);
+  if (!show) {
+    return;
+  }
+
+  // Pause button glyph follows lifecycle: paused -> play (resume), else pause.
+  const bool show_play_glyph = snapshot.lifecycle == PrintLifecycleState::kPaused;
+  set_label_text_if_changed(page2_pause_button_label_,
+                            show_play_glyph ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
+
+  // Visually disable both buttons while a command is in flight (avoid double-fire
+  // until the printer reflects the new lifecycle in its next status report).
+  const bool pending = snapshot.print_command_pending_kind != PrintCommand::kNone;
+  const lv_opa_t pause_opa = pending ? LV_OPA_40 : LV_OPA_90;
+  lv_obj_set_style_bg_opa(page2_pause_button_, pause_opa, 0);
+  lv_obj_set_style_bg_opa(page2_stop_button_, pause_opa, 0);
+}
+
 void Ui::set_brightness_percent(int brightness_percent) {
   const int clamped = std::clamp(brightness_percent, 0, 100);
   if (user_brightness_percent_ == clamped) {
@@ -3600,6 +3789,20 @@ void Ui::logo_event_cb(lv_event_t* event) {
   auto* ui = static_cast<Ui*>(lv_event_get_user_data(event));
   if (ui != nullptr) {
     ui->handle_logo_event(event);
+  }
+}
+
+void Ui::pause_button_event_cb(lv_event_t* event) {
+  auto* ui = static_cast<Ui*>(lv_event_get_user_data(event));
+  if (ui != nullptr) {
+    ui->handle_pause_button_event(event);
+  }
+}
+
+void Ui::stop_button_event_cb(lv_event_t* event) {
+  auto* ui = static_cast<Ui*>(lv_event_get_user_data(event));
+  if (ui != nullptr) {
+    ui->handle_stop_button_event(event);
   }
 }
 

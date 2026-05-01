@@ -2125,6 +2125,8 @@ void BambuCloudClient::publish_combined_snapshot() {
   current.preview_url = rest.preview_url;
   current.preview_blob = rest.preview_blob;
   current.preview_title = rest.preview_title;
+  current.estimated_filament_weight_g = rest.estimated_filament_weight_g;
+  current.estimated_filament_length_mm = rest.estimated_filament_length_mm;
   if (current.preview_title.empty() && has_text(live.job_name)) {
     current.preview_title = text_string(live.job_name);
   }
@@ -2295,6 +2297,21 @@ bool BambuCloudClient::set_chamber_light(bool on) {
   return true;
 }
 
+bool BambuCloudClient::set_print_command(PrintCommand command) {
+  if (command == PrintCommand::kNone) {
+    return false;
+  }
+  if (!mqtt_connected_.load() || !mqtt_subscription_acknowledged_.load()) {
+    return false;
+  }
+  print_command_pending_.store(static_cast<uint8_t>(command));
+  if (task_handle_ != nullptr && xTaskGetCurrentTaskHandle() != task_handle_) {
+    xTaskNotifyGive(task_handle_);
+  }
+  ESP_LOGI(kTag, "Cloud print command queued: %s", to_string(command));
+  return true;
+}
+
 void BambuCloudClient::mqtt_event_handler(void* handler_args, esp_event_base_t base,
                                           int32_t event_id, void* event_data) {
   (void)base;
@@ -2313,6 +2330,10 @@ void BambuCloudClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
   switch (static_cast<esp_mqtt_event_id_t>(event->event_id)) {
     case MQTT_EVENT_CONNECTED: {
       mqtt_connected_ = true;
+      mqtt_consecutive_failures_.store(0, std::memory_order_relaxed);
+      mqtt_total_successes_.fetch_add(1, std::memory_order_relaxed);
+      mqtt_last_success_ms_.store(now_ms(), std::memory_order_relaxed);
+      mqtt_current_backoff_ms_.store(0, std::memory_order_relaxed);
       mqtt_subscription_acknowledged_ = false;
       received_live_payload_ = false;
       initial_sync_sent_ = false;
@@ -2369,6 +2390,9 @@ void BambuCloudClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
 
     case MQTT_EVENT_DISCONNECTED:
       mqtt_connected_ = false;
+      mqtt_consecutive_failures_.fetch_add(1, std::memory_order_relaxed);
+      mqtt_total_failures_.fetch_add(1, std::memory_order_relaxed);
+      mqtt_last_failure_ms_.store(now_ms(), std::memory_order_relaxed);
       mqtt_subscription_acknowledged_ = false;
       received_live_payload_ = false;
       initial_sync_sent_ = false;
@@ -2425,6 +2449,9 @@ void BambuCloudClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
 
     case MQTT_EVENT_ERROR:
       mqtt_connected_ = false;
+      mqtt_consecutive_failures_.fetch_add(1, std::memory_order_relaxed);
+      mqtt_total_failures_.fetch_add(1, std::memory_order_relaxed);
+      mqtt_last_failure_ms_.store(now_ms(), std::memory_order_relaxed);
       mqtt_subscription_acknowledged_ = false;
       received_live_payload_ = false;
       initial_sync_sent_ = false;
@@ -2543,6 +2570,46 @@ void BambuCloudClient::process_pending_chamber_light_command() {
   }
 }
 
+bool BambuCloudClient::publish_print_command(PrintCommand command) {
+  if (mqtt_client_ == nullptr || !mqtt_connected_.load() ||
+      !mqtt_subscription_acknowledged_.load()) {
+    return false;
+  }
+  const char* token = mqtt_command_token(command);
+  if (token == nullptr || *token == '\0') {
+    return false;
+  }
+
+  // Identical wire format to LAN — Bambu's cloud MQTT bridge forwards print.*
+  // commands verbatim. QoS 1 per OpenBambuAPI.
+  char payload[160];
+  std::snprintf(payload, sizeof(payload),
+                "{\"print\":{\"sequence_id\":\"%u\",\"command\":\"%s\",\"param\":\"\"}}",
+                static_cast<unsigned int>(esp_random()), token);
+  const int msg_id = esp_mqtt_client_publish(mqtt_client_, mqtt_request_topic_.c_str(), payload,
+                                             0, 1, 0);
+  if (msg_id < 0) {
+    ESP_LOGW(kTag, "Failed to publish cloud print.%s", token);
+    return false;
+  }
+  return true;
+}
+
+void BambuCloudClient::process_pending_print_command() {
+  const uint8_t pending = print_command_pending_.load();
+  if (pending == static_cast<uint8_t>(PrintCommand::kNone) || mqtt_client_ == nullptr ||
+      !mqtt_connected_.load() || !mqtt_subscription_acknowledged_.load()) {
+    return;
+  }
+  const PrintCommand command = static_cast<PrintCommand>(pending);
+  print_command_pending_.store(static_cast<uint8_t>(PrintCommand::kNone));
+  if (publish_print_command(command)) {
+    ESP_LOGI(kTag, "Cloud print command published: %s", to_string(command));
+  } else {
+    ESP_LOGW(kTag, "Cloud print command publish failed: %s", to_string(command));
+  }
+}
+
 bool BambuCloudClient::ensure_cloud_mqtt_identity() {
   if (!mqtt_username_.empty()) {
     return true;
@@ -2621,9 +2688,23 @@ void BambuCloudClient::arm_mqtt_start_backoff(const char* reason) {
                          : (sizeof(kStepUs) / sizeof(kStepUs[0])) - 1;
   const int64_t delay_us = kStepUs[idx];
   mqtt_start_backoff_until_us_.store(esp_timer_get_time() + delay_us);
+  mqtt_current_backoff_ms_.store(static_cast<uint32_t>(delay_us / 1000), std::memory_order_relaxed);
   ESP_LOGW(kTag, "Cloud MQTT %s failed (attempt %u) — backing off for %lld s",
            reason ? reason : "?", static_cast<unsigned>(mqtt_start_backoff_attempts_),
            static_cast<long long>(delay_us / 1000000));
+}
+
+MqttTelemetry BambuCloudClient::mqtt_telemetry() const {
+  MqttTelemetry t{};
+  t.consecutive_failures = mqtt_consecutive_failures_.load(std::memory_order_relaxed);
+  t.total_failures = mqtt_total_failures_.load(std::memory_order_relaxed);
+  t.total_successes = mqtt_total_successes_.load(std::memory_order_relaxed);
+  t.last_attempt_ms = mqtt_last_attempt_ms_.load(std::memory_order_relaxed);
+  t.last_success_ms = mqtt_last_success_ms_.load(std::memory_order_relaxed);
+  t.last_failure_ms = mqtt_last_failure_ms_.load(std::memory_order_relaxed);
+  t.current_backoff_ms = mqtt_current_backoff_ms_.load(std::memory_order_relaxed);
+  t.connected = mqtt_connected_.load(std::memory_order_relaxed);
+  return t;
 }
 
 bool BambuCloudClient::ensure_mqtt_client_started() {
@@ -2707,6 +2788,7 @@ bool BambuCloudClient::ensure_mqtt_client_started() {
   // Successful start: clear any previous failure backoff.
   mqtt_start_backoff_attempts_ = 0;
   mqtt_start_backoff_until_us_.store(0);
+  mqtt_last_attempt_ms_.store(now_ms(), std::memory_order_relaxed);
 
   ESP_LOGI(kTag, "Connecting to Bambu Cloud MQTT %s:%u (serial=%s, user=%s)", mqtt_host,
            static_cast<unsigned int>(kCloudMqttPort), serial.c_str(), mqtt_username_.c_str());
@@ -3492,6 +3574,7 @@ void BambuCloudClient::task_loop() {
       continue;
     }
     process_pending_chamber_light_command();
+    process_pending_print_command();
     const TickType_t status_poll_interval =
         low_power ? kCloudStatusPollLowPower : kCloudStatusPollIdle;
     const bool initial_preview_window_open =
@@ -4232,6 +4315,10 @@ bool BambuCloudClient::fetch_latest_preview(bool allow_preview_download) {
     selected_cover = extract_cover_url(selected_item);
     selected_title = extract_title(selected_item);
   }
+  const float selected_filament_g =
+      selected_item != nullptr ? extract_filament_weight_g(selected_item) : 0.0f;
+  const float selected_filament_mm =
+      selected_item != nullptr ? extract_filament_length_mm(selected_item) : 0.0f;
 
   CloudRestRuntimeState current = rest_runtime_copy();
   current.capabilities = cloud_rest_capabilities();
@@ -4273,6 +4360,8 @@ bool BambuCloudClient::fetch_latest_preview(bool allow_preview_download) {
                              ? cached_preview_blob_
                              : nullptr;
   current.preview_title = selected_title;
+  current.estimated_filament_weight_g = selected_filament_g;
+  current.estimated_filament_length_mm = selected_filament_mm;
   if (!resolved_serial_.empty()) {
     copy_text(&current.resolved_serial, resolved_serial_);
   }
@@ -5177,6 +5266,61 @@ uint16_t BambuCloudClient::extract_total_layers(const cJSON* item) {
   }
 
   return 0U;
+}
+
+float BambuCloudClient::extract_filament_weight_g(const cJSON* item) {
+  if (item == nullptr) {
+    return 0.0f;
+  }
+
+  const cJSON* print_history = child_object(item, "print_history_info") != nullptr
+                                   ? child_object(item, "print_history_info")
+                                   : child_object(item, "printHistoryInfo");
+  const cJSON* subtask = print_history != nullptr ? child_object(print_history, "subtask") : nullptr;
+  // Bambu Cloud /v1/user-service/my/tasks reports the slicer estimate as
+  // `weight` (grams). Some payloads mirror it under `total_weight` /
+  // `filament_weight` / camelCase variants.
+  const char* keys[] = {"weight", "total_weight", "totalWeight", "filament_weight",
+                        "filamentWeight"};
+  for (const cJSON* source : {item, print_history, subtask}) {
+    if (source == nullptr) {
+      continue;
+    }
+    for (const char* key : keys) {
+      const float value = json_number(source, key, -1.0f);
+      if (value > 0.0f) {
+        return value;
+      }
+    }
+  }
+  return 0.0f;
+}
+
+float BambuCloudClient::extract_filament_length_mm(const cJSON* item) {
+  if (item == nullptr) {
+    return 0.0f;
+  }
+
+  const cJSON* print_history = child_object(item, "print_history_info") != nullptr
+                                   ? child_object(item, "print_history_info")
+                                   : child_object(item, "printHistoryInfo");
+  const cJSON* subtask = print_history != nullptr ? child_object(print_history, "subtask") : nullptr;
+  // `length` is reported in mm by the cloud task endpoint. `filament_length`
+  // covers older variants.
+  const char* keys[] = {"length", "filament_length", "filamentLength", "total_length",
+                        "totalLength"};
+  for (const cJSON* source : {item, print_history, subtask}) {
+    if (source == nullptr) {
+      continue;
+    }
+    for (const char* key : keys) {
+      const float value = json_number(source, key, -1.0f);
+      if (value > 0.0f) {
+        return value;
+      }
+    }
+  }
+  return 0.0f;
 }
 
 PrintLifecycleState BambuCloudClient::cloud_lifecycle_from_status(const std::string& status_text) {

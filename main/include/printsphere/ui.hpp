@@ -55,6 +55,14 @@ class Ui {
   bool consume_camera_refresh_request();
   bool consume_chamber_light_toggle_request();
   bool has_chamber_light_toggle_request() const { return chamber_light_toggle_requested_.load(); }
+  // Pause / resume / stop buttons on the preview page set this request.
+  // Application::loop polls it every iteration and dispatches via the LAN /
+  // Cloud client. Returns kNone when no command pending. Consuming clears
+  // the request atomically.
+  PrintCommand consume_print_command_request();
+  bool has_print_command_request() const {
+    return print_command_request_.load() != static_cast<uint8_t>(PrintCommand::kNone);
+  }
   bool consume_portal_unlock_request();
 
   struct PrinterCardInfo {
@@ -115,6 +123,11 @@ class Ui {
   static void pager_event_cb(lv_event_t* event);
   static void screen_event_cb(lv_event_t* event);
   static void logo_event_cb(lv_event_t* event);
+  static void pause_button_event_cb(lv_event_t* event);
+  static void stop_button_event_cb(lv_event_t* event);
+  void handle_pause_button_event(lv_event_t* event);
+  void handle_stop_button_event(lv_event_t* event);
+  void update_print_buttons_locked(const PrinterSnapshot& snapshot);
   static void remaining_row_event_cb(lv_event_t* event);
   void handle_remaining_row_click();
 
@@ -207,6 +220,14 @@ class Ui {
   lv_obj_t* page2_image_ = nullptr;
   lv_obj_t* page2_note_ = nullptr;
   lv_obj_t* page2_subnote_ = nullptr;
+  // Print-control buttons on the preview page. Visible while a job is in
+  // Printing/Paused/Preparing state. The pause button toggles between
+  // pause/resume based on lifecycle. The stop button requires LV_EVENT_LONG_PRESSED
+  // (~1.5s hold) so a stray tap can't kill a print.
+  lv_obj_t* page2_pause_button_ = nullptr;
+  lv_obj_t* page2_pause_button_label_ = nullptr;
+  lv_obj_t* page2_stop_button_ = nullptr;
+  lv_obj_t* page2_stop_button_label_ = nullptr;
   lv_obj_t* page3_image_ = nullptr;
   lv_obj_t* page3_note_ = nullptr;
   lv_obj_t* page3_subnote_ = nullptr;
@@ -288,6 +309,7 @@ class Ui {
   mutable std::mutex camera_refresh_mutex_{};
   bool camera_refresh_requested_ = false;
   std::atomic<bool> chamber_light_toggle_requested_{false};
+  std::atomic<uint8_t> print_command_request_{static_cast<uint8_t>(PrintCommand::kNone)};
   std::atomic<bool> portal_unlock_requested_{false};
   PrinterSnapshot deferred_snapshot_{};
   PrinterSnapshot last_snapshot_{};

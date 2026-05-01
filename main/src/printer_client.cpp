@@ -1237,6 +1237,19 @@ bool PrinterClient::set_chamber_light(bool on) {
   return true;
 }
 
+bool PrinterClient::set_print_command(PrintCommand command) {
+  if (command == PrintCommand::kNone) {
+    return false;
+  }
+  if (!mqtt_connected_.load()) {
+    return false;
+  }
+  print_command_pending_.store(static_cast<uint8_t>(command));
+  wake_task();
+  ESP_LOGI(kTag, "Local print command queued: %s", to_string(command));
+  return true;
+}
+
 PrinterConnection PrinterClient::desired_connection() const {
   std::lock_guard<std::mutex> lock(config_mutex_);
   return desired_connection_;
@@ -1356,6 +1369,9 @@ void PrinterClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
       cancel_client_rebuild();
       consecutive_probe_failures_ = 0;
       consecutive_mqtt_errors_ = 0;
+      mqtt_total_successes_.fetch_add(1, std::memory_order_relaxed);
+      mqtt_last_success_ms_.store(now_ms(), std::memory_order_relaxed);
+      mqtt_current_backoff_ms_.store(0, std::memory_order_relaxed);
       mqtt_connected_ = true;
       session_ever_established_ = true;
       received_payload_ = false;
@@ -1439,6 +1455,8 @@ void PrinterClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
 
     case MQTT_EVENT_DISCONNECTED: {
       mqtt_connected_ = false;
+      mqtt_total_failures_.fetch_add(1, std::memory_order_relaxed);
+      mqtt_last_failure_ms_.store(now_ms(), std::memory_order_relaxed);
       subscription_acknowledged_ = false;
       initial_sync_sent_ = false;
       delayed_pushall_sent_ = false;
@@ -1506,6 +1524,8 @@ void PrinterClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
 
     case MQTT_EVENT_ERROR: {
       mqtt_connected_ = false;
+      mqtt_total_failures_.fetch_add(1, std::memory_order_relaxed);
+      mqtt_last_failure_ms_.store(now_ms(), std::memory_order_relaxed);
       subscription_acknowledged_ = false;
       initial_sync_sent_ = false;
       delayed_pushall_sent_ = false;
@@ -2320,6 +2340,46 @@ void PrinterClient::process_pending_chamber_light_command() {
   }
 }
 
+bool PrinterClient::publish_print_command(PrintCommand command) {
+  if (!mqtt_connected_.load() || client_ == nullptr) {
+    return false;
+  }
+  const char* token = mqtt_command_token(command);
+  if (token == nullptr || *token == '\0') {
+    return false;
+  }
+
+  // OpenBambuAPI: print.pause / print.resume / print.stop are published with
+  // QoS 1 for higher priority (printer state-machine relies on delivery
+  // guarantee). All three carry an empty `param` field per the same spec.
+  char payload[160];
+  std::snprintf(payload, sizeof(payload),
+                "{\"print\":{\"sequence_id\":\"%u\",\"command\":\"%s\",\"param\":\"\"}}",
+                static_cast<unsigned int>(esp_random()), token);
+  const int msg_id =
+      esp_mqtt_client_publish(client_, request_topic_.c_str(), payload, 0, 1, 0);
+  if (msg_id < 0) {
+    ESP_LOGW(kTag, "Failed to publish local print.%s", token);
+    return false;
+  }
+  return true;
+}
+
+void PrinterClient::process_pending_print_command() {
+  const uint8_t pending = print_command_pending_.load();
+  if (pending == static_cast<uint8_t>(PrintCommand::kNone) || !mqtt_connected_.load() ||
+      client_ == nullptr) {
+    return;
+  }
+  const PrintCommand command = static_cast<PrintCommand>(pending);
+  print_command_pending_.store(static_cast<uint8_t>(PrintCommand::kNone));
+  if (publish_print_command(command)) {
+    ESP_LOGI(kTag, "Local print command published: %s", to_string(command));
+  } else {
+    ESP_LOGW(kTag, "Local print command publish failed: %s", to_string(command));
+  }
+}
+
 void PrinterClient::schedule_client_rebuild(const char* reason, uint32_t delay_ms,
                                             bool force_when_connected) {
   uint32_t effective_ms = delay_ms == 0 ? kRebuildDelayMs : delay_ms;
@@ -2348,6 +2408,8 @@ void PrinterClient::schedule_client_rebuild(const char* reason, uint32_t delay_m
   // local-only mode nobody would wake us out of.
   rebuild_request_tick_ = xTaskGetTickCount();
   rebuild_delay_ticks_ = delay_ticks;
+  mqtt_last_attempt_ms_.store(now_ms(), std::memory_order_relaxed);
+  mqtt_current_backoff_ms_.store(effective_ms, std::memory_order_relaxed);
   ESP_LOGW(kTag, "Scheduling MQTT client rebuild in %u ms (%s)",
            static_cast<unsigned int>(effective_ms),
            reason != nullptr ? reason : "unspecified");
@@ -2358,6 +2420,20 @@ void PrinterClient::cancel_client_rebuild() {
   force_client_rebuild_ = false;
   rebuild_request_tick_ = 0;
   rebuild_delay_ticks_ = 0;
+  mqtt_current_backoff_ms_.store(0, std::memory_order_relaxed);
+}
+
+MqttTelemetry PrinterClient::mqtt_telemetry() const {
+  MqttTelemetry t{};
+  t.consecutive_failures = consecutive_mqtt_errors_;
+  t.total_failures = mqtt_total_failures_.load(std::memory_order_relaxed);
+  t.total_successes = mqtt_total_successes_.load(std::memory_order_relaxed);
+  t.last_attempt_ms = mqtt_last_attempt_ms_.load(std::memory_order_relaxed);
+  t.last_success_ms = mqtt_last_success_ms_.load(std::memory_order_relaxed);
+  t.last_failure_ms = mqtt_last_failure_ms_.load(std::memory_order_relaxed);
+  t.current_backoff_ms = mqtt_current_backoff_ms_.load(std::memory_order_relaxed);
+  t.connected = mqtt_connected_.load(std::memory_order_relaxed);
+  return t;
 }
 
 void PrinterClient::notify_cloud_presence(bool online) {
@@ -2747,6 +2823,7 @@ void PrinterClient::task_loop() {
     }
 
     process_pending_chamber_light_command();
+    process_pending_print_command();
 
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
   }
