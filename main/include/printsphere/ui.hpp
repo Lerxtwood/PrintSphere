@@ -40,15 +40,28 @@ class Ui {
   esp_err_t initialize();
   void set_arc_color_scheme(const ArcColorScheme& colors);
   void apply_snapshot(const PrinterSnapshot& snapshot);
-  void update_power_save(bool on_battery, bool print_active);
+  void update_power_save(bool on_battery, bool keep_awake);
   void set_battery_display_policy(const BatteryDisplayPolicy& policy);
   bool is_low_power_mode_active() const;
   ScreenPowerMode screen_power_mode() const { return screen_power_mode_; }
-  bool is_config_page_active() const { return !scrolling_ && active_page_ == kPageIdxPrinterSelect; }
-  bool is_page2_active() const { return !scrolling_ && active_page_ == kPageIdxPreview; }
-  bool is_camera_page_active() const { return !scrolling_ && active_page_ == kPageIdxCamera; }
-  bool is_camera_page_visible() const { return active_page_ == kPageIdxCamera; }
-  bool is_page_transition_active() const { return scrolling_; }
+  bool is_config_page_active() const {
+    return !page_scrolling_snapshot_.load(std::memory_order_relaxed) &&
+           active_page_snapshot_.load(std::memory_order_relaxed) == kPageIdxPrinterSelect;
+  }
+  bool is_page2_active() const {
+    return !page_scrolling_snapshot_.load(std::memory_order_relaxed) &&
+           active_page_snapshot_.load(std::memory_order_relaxed) == kPageIdxPreview;
+  }
+  bool is_camera_page_active() const {
+    return !page_scrolling_snapshot_.load(std::memory_order_relaxed) &&
+           active_page_snapshot_.load(std::memory_order_relaxed) == kPageIdxCamera;
+  }
+  bool is_camera_page_visible() const {
+    return active_page_snapshot_.load(std::memory_order_relaxed) == kPageIdxCamera;
+  }
+  bool is_page_transition_active() const {
+    return page_scrolling_snapshot_.load(std::memory_order_relaxed);
+  }
   void set_portal_access_state(bool lock_enabled, bool request_authorized, bool session_active,
                                bool pin_active, const std::string& pin_code,
                                uint32_t pin_remaining_s, uint32_t session_remaining_s);
@@ -96,6 +109,7 @@ class Ui {
   void apply_brightness_policy();
   void set_pager_scroll_locked(bool locked);
   void set_active_page(int page);
+  void publish_page_state_snapshot();
   int clamp_enabled_page(int page) const;
   int next_enabled_page(int page, int direction) const;
   int nearest_enabled_page_for_scroll() const;
@@ -206,6 +220,9 @@ class Ui {
   lv_obj_t* status_label_ = nullptr;
   lv_obj_t* detail_label_ = nullptr;
   lv_obj_t* layer_label_ = nullptr;
+  lv_obj_t* layer_row_ = nullptr;
+  lv_obj_t* filament_icon_label_ = nullptr;
+  lv_obj_t* filament_value_label_ = nullptr;
   lv_obj_t* nozzle_prefix_label_ = nullptr;
   lv_obj_t* nozzle_value_label_ = nullptr;
   lv_obj_t* nozzle_aux_label_ = nullptr;
@@ -268,6 +285,8 @@ class Ui {
   lv_coord_t gesture_start_y_ = 0;
   int gesture_start_brightness_ = 80;
   int active_page_ = 0;
+  std::atomic<int> active_page_snapshot_{0};
+  std::atomic<bool> page_scrolling_snapshot_{false};
   int last_parallax_clamped_ = -1;
   ArcColorScheme arc_colors_{};
   uint32_t last_accent_hex_ = 0;

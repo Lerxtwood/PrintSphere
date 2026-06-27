@@ -267,8 +267,7 @@ bool cloud_temperature_known(uint64_t last_update_ms, bool cloud_connected) {
 }
 
 bool local_camera_available(const PrinterSnapshot& snapshot) {
-  return snapshot.local_capabilities.camera_jpeg_socket || snapshot.local_capabilities.camera_rtsp ||
-         snapshot.local_model == PrinterModel::kUnknown || !snapshot.camera_rtsp_url.empty();
+  return snapshot.local_capabilities.camera_jpeg_socket;
 }
 
 PrinterModel preferred_model_for_routing(const PrinterSnapshot& local_snapshot,
@@ -693,6 +692,208 @@ PrinterModel effective_model_for_snapshot(const PrinterSnapshot& snapshot) {
   return snapshot.cloud_model;
 }
 
+// -----------------------------------------------------------------------------
+// resolve_ui_state() helpers.
+//
+// resolve_ui_state() turns a merged snapshot into the user-facing
+// `lifecycle`, `print_active`, `has_error`, `warn_hms`, and `ui_status`
+// fields. The decision is driven by ~20 boolean signals derived from the
+// raw status / stage strings and a few snapshot scalars.
+//
+// The signals are gathered into UiStateSignals once, then individual
+// selectors decide each output field. Splitting the original 150-line
+// function this way keeps the data-flow flat and gives each decision a
+// name; the compiler inlines all of it on -Os, so there is no runtime
+// or stack cost on the device.
+// -----------------------------------------------------------------------------
+
+struct UiStateSignals {
+  // Raw inputs (lower-cased copies, see effective_status/effective_stage).
+  std::string status;
+  std::string stage;
+  int progress = 0;  // [0..100]
+
+  // Stage classifiers.
+  bool download_stage = false;
+  bool filament_stage = false;
+  bool preheat_stage = false;
+  bool clean_stage = false;
+  bool level_stage = false;
+  bool cooling_stage = false;
+  bool setup_stage = false;
+
+  // Status / lifecycle classifiers.
+  bool ps_failed = false;
+  bool err_print = false;
+  bool err_hms = false;
+  bool input_error = false;  // pre-existing snapshot.has_error
+  bool paused = false;
+  bool preparing = false;
+  bool idle_status = false;
+  bool idleish = false;       // stage-side "idle"/"offline" hint
+  bool done_strict = false;
+  bool active_hint = false;
+};
+
+// Gathers all derived signals used by the lifecycle / ui_status selectors.
+// May clear `snapshot.progress_is_download_related` when a download has
+// completed and handed off to the next stage (existing behaviour).
+UiStateSignals build_ui_state_signals(PrinterSnapshot& snapshot) {
+  UiStateSignals s;
+
+  s.status = effective_status(snapshot);
+  s.stage = effective_stage(snapshot);
+  s.progress = std::clamp(static_cast<int>(std::lround(snapshot.progress_percent)), 0, 100);
+
+  const bool download_stage_by_name = is_download_stage(s.stage, s.status);
+  const bool completed_download_handoff =
+      snapshot.progress_is_download_related && s.progress == 100 &&
+      is_post_download_handoff_stage(s.stage, s.status);
+  if (completed_download_handoff) {
+    snapshot.progress_is_download_related = false;
+  }
+
+  s.download_stage = snapshot.progress_is_download_related || download_stage_by_name;
+  s.filament_stage = is_filament_stage(s.stage);
+  s.preheat_stage = is_preheat_stage(s.stage);
+  s.clean_stage = is_clean_stage(s.stage);
+  s.level_stage = is_level_stage(s.stage);
+  s.cooling_stage = is_cooling_stage(s.stage, s.status);
+  s.setup_stage = is_setup_stage(s.stage);
+
+  s.ps_failed = is_failed_status(s.status);
+  s.err_print = snapshot.print_error_code != 0;
+  s.err_hms = !snapshot.hms_codes.empty() || snapshot.hms_alert_count > 0;
+  s.input_error = snapshot.has_error;
+  s.paused = is_paused_status(s.status, s.stage);
+  s.preparing = is_prepare_status(s.status, s.stage);
+  s.idle_status = s.status == "idle" || s.status == "offline" || contains_token(s.status, "wait");
+  s.idleish = contains_token(s.stage, "idle") || contains_token(s.stage, "offline");
+
+  s.done_strict =
+      snapshot.lifecycle == PrintLifecycleState::kFinished ||
+      (is_finished_status(s.status) &&
+       (s.progress == 100 || snapshot.remaining_seconds == 0U ||
+        contains_token(s.stage, "idle")));
+
+  const bool running_like =
+      bambu_status_is_printing(s.status) || bambu_status_is_preparing(s.status) ||
+      contains_token(s.status, "print") || contains_token(s.status, "download") ||
+      (s.progress > 0 && s.progress < 100);
+
+  s.active_hint =
+      running_like || s.paused || s.preparing || s.filament_stage || s.download_stage ||
+      s.preheat_stage || s.clean_stage || s.level_stage || s.cooling_stage || s.setup_stage ||
+      contains_token(s.stage, "printing") ||
+      (snapshot.current_layer > 0 && s.progress < 100) ||
+      (snapshot.remaining_seconds > 0 && !is_finished_status(s.status));
+
+  return s;
+}
+
+// User-cancelled Bambu jobs surface as FAILED/FAIL with no concrete error
+// payload. Treat as a brief stopped state, then fall back to ready.
+void apply_non_error_stop(PrinterSnapshot& snapshot) {
+  snapshot.lifecycle = PrintLifecycleState::kIdle;
+  snapshot.has_error = false;
+  snapshot.print_active = false;
+  snapshot.warn_hms = false;
+  snapshot.remaining_seconds = 0U;
+
+  if (snapshot.show_stop_banner) {
+    snapshot.raw_stage = "Stopped";
+    snapshot.stage = "Stopped";
+    snapshot.ui_status = "stopped";
+    snapshot.detail.clear();
+  } else {
+    snapshot.raw_status = "IDLE";
+    snapshot.raw_stage = "Idle";
+    snapshot.stage = "Idle";
+    snapshot.ui_status = "ready";
+    snapshot.detail.clear();
+  }
+}
+
+// Updates print_active / has_error / warn_hms.
+//
+// Bambu uses print_error_code for user-action prompts during filament
+// changes (e.g. "please feed filament"), not real errors — so we suppress
+// err_print during a filament stage.
+void apply_active_and_error_flags(PrinterSnapshot& snapshot, const UiStateSignals& s) {
+  if (s.ps_failed || s.done_strict) {
+    snapshot.print_active = false;
+  } else if (s.active_hint) {
+    snapshot.print_active = true;
+  } else {
+    snapshot.print_active = false;
+  }
+
+  snapshot.has_error = s.input_error || s.ps_failed || (s.err_print && !s.filament_stage);
+  snapshot.warn_hms = s.err_hms && snapshot.print_active && !snapshot.has_error;
+}
+
+PrintLifecycleState select_lifecycle(const PrinterSnapshot& snapshot, const UiStateSignals& s) {
+  if (snapshot.has_error) return PrintLifecycleState::kError;
+  if (s.done_strict) return PrintLifecycleState::kFinished;
+  if (s.paused) return PrintLifecycleState::kPaused;
+  if (s.preparing) return PrintLifecycleState::kPreparing;
+  if (snapshot.print_active) return PrintLifecycleState::kPrinting;
+  if (s.idleish || s.idle_status) return PrintLifecycleState::kIdle;
+  return snapshot.lifecycle;  // unchanged
+}
+
+// Fallback path used when no specific stage / status classifier matched.
+// Picks the most descriptive label available, in priority order:
+// pretty stage > pretty status > shortened stage > shortened status >
+// connection-aware default ("waiting..."/"offline").
+std::string select_ui_status_fallback(const PrinterSnapshot& snapshot, const UiStateSignals& s) {
+  const std::string stage_text = pretty_stage(s.stage);
+  if (!stage_text.empty() && !contains_token(s.stage, "idle") &&
+      !contains_token(s.stage, "offline")) {
+    return stage_text;
+  }
+  const std::string status_text = pretty_status(s.status);
+  if (!status_text.empty()) {
+    return status_text;
+  }
+  if (!s.stage.empty()) {
+    return shorten(titlecase_words(s.stage), 18);
+  }
+  if (!s.status.empty()) {
+    return shorten(titlecase_words(s.status), 18);
+  }
+  return snapshot.wifi_connected ? "waiting..." : "offline";
+}
+
+std::string select_ui_status(const PrinterSnapshot& snapshot, const UiStateSignals& s) {
+  if (s.filament_stage) {
+    return contains_token(s.stage, "filament_unloading") ? "unloading" : "loading";
+  }
+  if (s.download_stage) return "downloading";
+  if (snapshot.has_error) return "failed";
+  if (snapshot.warn_hms) return "printing";
+  if (s.done_strict) return "done";
+  if (s.preheat_stage) return "preheating";
+  if (s.clean_stage) return "clean nozzle";
+  if (s.level_stage) return "bed level";
+  if (s.cooling_stage) return "cooling";
+  if (s.setup_stage || s.preparing) return "preparing";
+
+  const bool offline =
+      contains_token(s.stage, "offline") || s.status == "offline" ||
+      (!snapshot.wifi_connected &&
+       snapshot.connection != PrinterConnectionState::kWaitingForCredentials);
+
+  if (s.idleish || offline) {
+    if (offline) return "offline";
+    if (s.preparing) return "preparing";
+    if ((s.progress > 0 && s.progress < 100) || snapshot.print_active) return "printing";
+    return "idle";
+  }
+
+  return select_ui_status_fallback(snapshot, s);
+}
+
 }  // namespace
 
 // --- Exported stage classification helpers (case-insensitive) -----------------
@@ -723,153 +924,15 @@ bool is_post_download_handoff_stage(const std::string& stage, const std::string&
 
 void resolve_ui_state(PrinterSnapshot& snapshot) {
   if (is_non_error_stop(snapshot)) {
-    // User-cancelled Bambu jobs currently surface as FAILED/FAIL without any concrete
-    // printer error payload. Treat that as a brief stopped state, then fall back to ready.
-    snapshot.lifecycle = PrintLifecycleState::kIdle;
-    snapshot.has_error = false;
-    snapshot.print_active = false;
-    snapshot.warn_hms = false;
-    snapshot.remaining_seconds = 0U;
-
-    if (snapshot.show_stop_banner) {
-      snapshot.raw_stage = "Stopped";
-      snapshot.stage = "Stopped";
-      snapshot.ui_status = "stopped";
-      snapshot.detail.clear();
-    } else {
-      snapshot.raw_status = "IDLE";
-      snapshot.raw_stage = "Idle";
-      snapshot.stage = "Idle";
-      snapshot.ui_status = "ready";
-      snapshot.detail.clear();
-    }
+    apply_non_error_stop(snapshot);
     return;
   }
 
-  const std::string status = effective_status(snapshot);
-  const std::string stage = effective_stage(snapshot);
-  const int progress = std::clamp(static_cast<int>(std::lround(snapshot.progress_percent)), 0, 100);
-  const bool download_stage_by_name = is_download_stage(stage, status);
-  const bool completed_download_handoff =
-      snapshot.progress_is_download_related && progress == 100 &&
-      is_post_download_handoff_stage(stage, status);
-  if (completed_download_handoff) {
-    snapshot.progress_is_download_related = false;
-  }
-  const bool filament_stage = is_filament_stage(stage);
-  const bool download_stage =
-      snapshot.progress_is_download_related || download_stage_by_name;
-  const bool preheat_stage = is_preheat_stage(stage);
-  const bool clean_stage = is_clean_stage(stage);
-  const bool level_stage = is_level_stage(stage);
-  const bool cooling_stage = is_cooling_stage(stage, status);
-  const bool setup_stage = is_setup_stage(stage);
+  const UiStateSignals s = build_ui_state_signals(snapshot);
 
-  const bool ps_failed = is_failed_status(status);
-  const bool err_print = snapshot.print_error_code != 0;
-  const bool err_hms = !snapshot.hms_codes.empty() || snapshot.hms_alert_count > 0;
-  const bool input_error = snapshot.has_error;
-  const bool paused = is_paused_status(status, stage);
-  const bool preparing = is_prepare_status(status, stage);
-  const bool idle_status = status == "idle" || status == "offline" || contains_token(status, "wait");
-  const bool idleish = contains_token(stage, "idle") || contains_token(stage, "offline");
-  const bool done_strict =
-      snapshot.lifecycle == PrintLifecycleState::kFinished ||
-      (is_finished_status(status) &&
-       (progress == 100 || snapshot.remaining_seconds == 0U || contains_token(stage, "idle")));
-  const bool running_like =
-      bambu_status_is_printing(status) || bambu_status_is_preparing(status) ||
-      contains_token(status, "print") || contains_token(status, "download") ||
-                            (progress > 0 && progress < 100);
-  const bool active_hint =
-      running_like || paused || preparing || filament_stage || download_stage ||
-      preheat_stage || clean_stage || level_stage || cooling_stage || setup_stage ||
-      contains_token(stage, "printing") ||
-      (snapshot.current_layer > 0 && progress < 100) ||
-      (snapshot.remaining_seconds > 0 && !is_finished_status(status));
-
-  if (ps_failed || done_strict) {
-    snapshot.print_active = false;
-  } else if (active_hint) {
-    snapshot.print_active = true;
-  } else {
-    snapshot.print_active = false;
-  }
-
-  // Bambu uses print_error_code for user-action prompts during filament changes
-  // (e.g. "please feed filament"), not real errors.  Suppress during filament stage.
-  snapshot.has_error = input_error || ps_failed || (err_print && !filament_stage);
-  snapshot.warn_hms = err_hms && snapshot.print_active && !snapshot.has_error;
-
-  if (snapshot.has_error) {
-    snapshot.lifecycle = PrintLifecycleState::kError;
-  } else if (done_strict) {
-    snapshot.lifecycle = PrintLifecycleState::kFinished;
-  } else if (paused) {
-    snapshot.lifecycle = PrintLifecycleState::kPaused;
-  } else if (preparing) {
-    snapshot.lifecycle = PrintLifecycleState::kPreparing;
-  } else if (snapshot.print_active) {
-    snapshot.lifecycle = PrintLifecycleState::kPrinting;
-  } else if (idleish || idle_status) {
-    snapshot.lifecycle = PrintLifecycleState::kIdle;
-  }
-
-  if (filament_stage) {
-    snapshot.ui_status = contains_token(stage, "filament_unloading") ? "unloading" : "loading";
-  } else if (download_stage) {
-    snapshot.ui_status = "downloading";
-  } else if (snapshot.has_error) {
-    snapshot.ui_status = "failed";
-  } else if (snapshot.warn_hms) {
-    snapshot.ui_status = "printing";
-  } else if (done_strict) {
-    snapshot.ui_status = "done";
-  } else if (preheat_stage) {
-    snapshot.ui_status = "preheating";
-  } else if (clean_stage) {
-    snapshot.ui_status = "clean nozzle";
-  } else if (level_stage) {
-    snapshot.ui_status = "bed level";
-  } else if (cooling_stage) {
-    snapshot.ui_status = "cooling";
-  } else if (setup_stage || preparing) {
-    snapshot.ui_status = "preparing";
-  } else {
-    const bool offline =
-        contains_token(stage, "offline") || status == "offline" ||
-        (!snapshot.wifi_connected &&
-         snapshot.connection != PrinterConnectionState::kWaitingForCredentials);
-
-    if (idleish || offline) {
-      if (offline) {
-        snapshot.ui_status = "offline";
-      } else if (preparing) {
-        snapshot.ui_status = "preparing";
-      } else if ((progress > 0 && progress < 100) || snapshot.print_active) {
-        snapshot.ui_status = "printing";
-      } else {
-        snapshot.ui_status = "idle";
-      }
-    } else {
-      const std::string stage_text = pretty_stage(stage);
-      if (!stage_text.empty() && !contains_token(stage, "idle") &&
-          !contains_token(stage, "offline")) {
-        snapshot.ui_status = stage_text;
-      } else {
-        const std::string status_text = pretty_status(status);
-        if (!status_text.empty()) {
-          snapshot.ui_status = status_text;
-        } else if (!stage.empty()) {
-          snapshot.ui_status = shorten(titlecase_words(stage), 18);
-        } else if (!status.empty()) {
-          snapshot.ui_status = shorten(titlecase_words(status), 18);
-        } else {
-          snapshot.ui_status = snapshot.wifi_connected ? "waiting..." : "offline";
-        }
-      }
-    }
-  }
+  apply_active_and_error_flags(snapshot, s);
+  snapshot.lifecycle = select_lifecycle(snapshot, s);
+  snapshot.ui_status = select_ui_status(snapshot, s);
 
   apply_resolved_detail(snapshot);
 }
@@ -919,6 +982,26 @@ PrinterSnapshot merge_status_sources(const PrinterSnapshot& local_snapshot, bool
   } else if (cloud_source.metrics_usable) {
     snapshot.metrics_source = FieldSource::kCloud;
     apply_cloud_metrics_bundle(snapshot, cloud_snapshot);
+  }
+
+  // The slicer-side filament estimate (weight / length) is only ever
+  // reported by the Bambu Cloud task descriptor — local MQTT has no
+  // equivalent field. When local metrics win the routing decision we
+  // still want to surface the cloud estimate, so merge it as a
+  // best-effort fallback whenever the cloud carries a value and the
+  // local pipeline did not populate one.
+  if (cloud_enabled) {
+    if (snapshot.estimated_filament_weight_g <= 0.0f &&
+        cloud_snapshot.estimated_filament_weight_g > 0.0f) {
+      snapshot.estimated_filament_weight_g = cloud_snapshot.estimated_filament_weight_g;
+    }
+    if (snapshot.estimated_filament_length_mm <= 0.0f &&
+        cloud_snapshot.estimated_filament_length_mm > 0.0f) {
+      snapshot.estimated_filament_length_mm = cloud_snapshot.estimated_filament_length_mm;
+    }
+    if (snapshot.job_name.empty() && !cloud_snapshot.preview_title.empty()) {
+      snapshot.job_name = cloud_snapshot.preview_title;
+    }
   }
 
   if (local_source.temperatures_usable) {

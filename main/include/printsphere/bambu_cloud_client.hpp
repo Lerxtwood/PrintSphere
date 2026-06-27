@@ -184,7 +184,10 @@ class BambuCloudClient {
   void set_fetch_paused(bool paused);
   void set_live_mqtt_enabled(bool enabled) {
     const bool previous = live_mqtt_enabled_.exchange(enabled);
-    if (previous != enabled && task_handle_ != nullptr) {
+    if (!enabled) {
+      mqtt_stop_requested_ = true;
+    }
+    if ((previous != enabled || !enabled) && task_handle_ != nullptr) {
       xTaskNotifyGive(task_handle_);
     }
   }

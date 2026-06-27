@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -176,7 +177,7 @@ size_t allocated_size(const void* ptr) {
 }
 
 void log_heap_diag(const char* context) {
-  ESP_LOGI(kTag,
+  ESP_LOGV(kTag,
            "[RAM] %s: int_free=%u int_largest=%u dma_free=%u dma_largest=%u "
            "psram_free=%u psram_largest=%u",
            context != nullptr ? context : "-",
@@ -190,7 +191,7 @@ void log_heap_diag(const char* context) {
 
 void log_blob_diag(const char* context, const std::shared_ptr<std::vector<uint8_t>>& blob) {
   const void* data = blob && !blob->empty() ? blob->data() : nullptr;
-  ESP_LOGI(kTag,
+  ESP_LOGV(kTag,
            "[RAM] %s: size=%u capacity=%u alloc=%u ram=%s data=%p",
            context != nullptr ? context : "-",
            static_cast<unsigned>(blob ? blob->size() : 0U),
@@ -3569,6 +3570,28 @@ void BambuCloudClient::task_loop() {
                "Still no cloud status payload after delayed pushall, restarting cloud MQTT "
                "after %u ms backoff",
                static_cast<unsigned>(backoff * portTICK_PERIOD_MS));
+      // Treat absence of any cloud push payload after the delayed PUSH_ALL as
+      // the printer being offline / powered off. The Bambu Cloud session is
+      // alive (subscribe was acknowledged) but the device is not pushing
+      // status, which typically means it's powered down or freshly waking up.
+      // Demoting `printer_online` here lets the hybrid gate in Application
+      // close, which suspends the local MQTT reconnect loop until the cloud
+      // emits a real `client.connected` event or we receive a live payload.
+      // Without this the local task keeps hammering TLS handshakes against
+      // an unreachable LAN host every 30-60 s.
+      {
+        CloudRestRuntimeState rest = rest_runtime_copy();
+        if (rest.printer_online) {
+          rest.printer_online = false;
+          ESP_LOGI(kTag,
+                   "Cloud sync timeout: no push data — marking printer offline for hybrid gate");
+          store_rest_runtime(std::move(rest), false);
+          publish_combined_snapshot();
+          if (printer_presence_callback_) {
+            printer_presence_callback_(false);
+          }
+        }
+      }
       stop_mqtt_client();
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
       continue;
@@ -4362,6 +4385,33 @@ bool BambuCloudClient::fetch_latest_preview(bool allow_preview_download) {
   current.preview_title = selected_title;
   current.estimated_filament_weight_g = selected_filament_g;
   current.estimated_filament_length_mm = selected_filament_mm;
+  // One-shot diagnostic: log the filament estimate we extracted from the
+  // cloud task descriptor, plus the top-level item keys when nothing was
+  // found. Helps confirm whether `weight` / `length` actually appear in the
+  // selected item or live under a different path / are absent for this job.
+  {
+    static float last_logged_weight = -1.0f;
+    if (selected_item != nullptr &&
+        std::fabs(selected_filament_g - last_logged_weight) > 0.01f) {
+      last_logged_weight = selected_filament_g;
+      if (selected_filament_g > 0.0f || selected_filament_mm > 0.0f) {
+        ESP_LOGI(kTag, "Cloud filament estimate: weight=%.1fg length=%.1fmm",
+                 selected_filament_g, selected_filament_mm);
+      } else {
+        std::string keys;
+        for (const cJSON* child = selected_item->child;
+             child != nullptr && keys.size() < 256; child = child->next) {
+          if (child->string != nullptr) {
+            if (!keys.empty()) keys.append(",");
+            keys.append(child->string);
+          }
+        }
+        ESP_LOGD(kTag,
+                 "Cloud filament estimate missing on selected task (item keys: %s)",
+                 keys.c_str());
+      }
+    }
+  }
   if (!resolved_serial_.empty()) {
     copy_text(&current.resolved_serial, resolved_serial_);
   }

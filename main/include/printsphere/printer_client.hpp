@@ -192,6 +192,7 @@ class PrinterClient {
   // since boot and survive reconnect cycles.
   std::atomic<uint32_t> mqtt_total_failures_{0};
   std::atomic<uint32_t> mqtt_total_successes_{0};
+  std::atomic<uint64_t> mqtt_connect_started_ms_{0};
   std::atomic<uint64_t> mqtt_last_attempt_ms_{0};
   std::atomic<uint64_t> mqtt_last_success_ms_{0};
   std::atomic<uint64_t> mqtt_last_failure_ms_{0};

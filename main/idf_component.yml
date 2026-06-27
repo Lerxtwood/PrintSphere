@@ -1,6 +1,8 @@
 dependencies:
   idf:
-    version: ">=6.0.0"
+    version: ">=5.5.4"
+  joltwallet/littlefs:
+    version: "^1.20.1"
   lvgl/lvgl:
     version: "9.5.0"
   espressif/cjson:

@@ -29,6 +29,7 @@ idf_component_register(
         "include/certs/bambu.cert"
         "include/certs/bambu_p2s_250626.cert"
         "include/certs/bambu_h2c_251122.cert"
+        "include/certs/bambu_x2c_260425.cert"
         "include/error_lookup/error_lookup.tsv"
     REQUIRES
         XPowersLib
@@ -48,6 +49,7 @@ idf_component_register(
         libpng
         lvgl
         nvs_flash
+        joltwallet__littlefs
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE

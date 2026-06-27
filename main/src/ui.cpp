@@ -73,9 +73,6 @@ constexpr int kRotatedVisualOffsetX = 0;
 constexpr int kRotatedVisualOffsetY = 0;
 constexpr int kManualMinBrightnessPercent = 4;
 constexpr uint8_t kRingPulseDepthPercent = 55U;
-constexpr uint32_t kDotPulseDurationMs = 1500U;
-constexpr int32_t kDotPulseOpaMin = 80;
-constexpr int32_t kDotPulseOpaMax = 255;
 constexpr int32_t kParallaxTitleMaxY = -18;
 constexpr int32_t kParallaxCardsMaxY = -8;
 constexpr uint32_t kBatteryDimTimeoutIdleMs = 20000U;
@@ -93,6 +90,7 @@ constexpr char kMdiClock[] = "\xF3\xB1\x91\x8E";
 constexpr char kMdiNozzle[] = "\xF3\xB0\xB9\x9B";
 constexpr char kMdiBed[] = "\xF3\xB1\xA1\x9B";
 constexpr char kMdiSync[] = "\xF3\xB1\x9B\x87";
+constexpr char kMdiSpool[] = "\xF3\xB1\x82\x97";  // U+F1097 mdi-spool
 constexpr char kMdiBatteryCharging0[] = "\xF3\xB0\xA0\x92";
 constexpr char kMdiBatteryCharging10[] = "\xF3\xB0\xA0\x88";
 constexpr char kMdiBatteryCharging20[] = "\xF3\xB0\xA0\x89";
@@ -135,6 +133,9 @@ class LvglLockGuard {
                  (unsigned long)lock_fail_count_);
       }
     } else {
+      acquire_seq_ = ++total_acquires_;
+      previous_active_ = active_;
+      active_ = this;
       if (lock_fail_count_ > 0) {
         ESP_LOGI(kTag, "LVGL lock recovered after %lu failures (wait=%lums, caller=%s)",
                  (unsigned long)lock_fail_count_, (unsigned long)wait_ms, caller_);
@@ -151,25 +152,52 @@ class LvglLockGuard {
   ~LvglLockGuard() {
     if (locked_) {
       const uint32_t held_ms = esp_log_timestamp() - acquired_ts_;
+      const char* last_phase = phase_;
+      const uint32_t since_phase = phase_ts_ != 0 ? (esp_log_timestamp() - phase_ts_) : 0;
+      active_ = previous_active_;
       bsp_display_unlock();
       if (held_ms > 80) {
-        ESP_LOGW(kTag, "LVGL lock held %lums (caller=%s)",
-                 (unsigned long)held_ms, caller_);
+        ESP_LOGW(kTag,
+                 "LVGL lock held %lums (caller=%s seq=%lu phase=%s phase_ms=%lu)",
+                 (unsigned long)held_ms, caller_, (unsigned long)acquire_seq_,
+                 last_phase != nullptr ? last_phase : "-",
+                 (unsigned long)since_phase);
       }
+    }
+  }
+
+  void mark_phase(const char* phase) {
+    phase_ = phase;
+    phase_ts_ = esp_log_timestamp();
+  }
+
+  // Annotate the currently active guard from anywhere underneath it.
+  static void note_phase(const char* phase) {
+    if (active_ != nullptr) {
+      active_->mark_phase(phase);
     }
   }
 
   bool locked() const { return locked_; }
 
   static uint32_t lock_fail_count_;
+  static uint32_t total_acquires_;
 
  private:
   const char* caller_ = "?";
+  const char* phase_ = nullptr;
   uint32_t acquired_ts_ = 0;
+  uint32_t phase_ts_ = 0;
+  uint32_t acquire_seq_ = 0;
   bool locked_ = false;
+  LvglLockGuard* previous_active_ = nullptr;
+
+  static thread_local LvglLockGuard* active_;
 };
 
 uint32_t LvglLockGuard::lock_fail_count_ = 0;
+uint32_t LvglLockGuard::total_acquires_ = 0;
+thread_local LvglLockGuard* LvglLockGuard::active_ = nullptr;
 
 const char* ram_region(const void* ptr) {
   if (ptr == nullptr) {
@@ -187,7 +215,7 @@ size_t allocated_size(const void* ptr) {
 }
 
 void log_heap_diag(const char* context) {
-  ESP_LOGI(kTag,
+  ESP_LOGV(kTag,
            "[RAM] %s: int_free=%u int_largest=%u dma_free=%u dma_largest=%u "
            "psram_free=%u psram_largest=%u",
            context != nullptr ? context : "-",
@@ -201,7 +229,7 @@ void log_heap_diag(const char* context) {
 
 void log_blob_diag(const char* context, const std::shared_ptr<std::vector<uint8_t>>& blob) {
   const void* data = blob && !blob->empty() ? blob->data() : nullptr;
-  ESP_LOGI(kTag,
+  ESP_LOGV(kTag,
            "[RAM] %s: size=%u capacity=%u alloc=%u ram=%s data=%p",
            context != nullptr ? context : "-",
            static_cast<unsigned>(blob ? blob->size() : 0U),
@@ -922,21 +950,28 @@ std::string layer_text(const PrinterSnapshot& snapshot) {
   } else {
     std::snprintf(buffer, sizeof(buffer), "Layer: -- / --");
   }
-  std::string text = buffer;
-  // Append slicer filament estimate when the cloud task descriptor exposes it.
-  // Format compactly so it fits next to the layer counter on the 320 px label.
-  if (snapshot.estimated_filament_weight_g > 0.0f) {
-    char fila[24] = {};
-    if (snapshot.estimated_filament_weight_g >= 1000.0f) {
-      std::snprintf(fila, sizeof(fila), "  ~%.2fkg",
-                    snapshot.estimated_filament_weight_g / 1000.0f);
-    } else {
-      std::snprintf(fila, sizeof(fila), "  ~%.0fg",
-                    snapshot.estimated_filament_weight_g);
-    }
-    text += fila;
+  return std::string(buffer);
+}
+
+// Format the slicer filament weight estimate as a compact "14g" / "1.45kg"
+// string. Returned empty when no estimate is available so the caller can
+// hide the dedicated icon + value labels in the layer row.
+// NOTE: The tilde '~' character is intentionally omitted — the embedded
+// dosis_32 font does not include U+007E (tilde) so it would render as a
+// blank tofu rectangle.
+std::string filament_estimate_text(const PrinterSnapshot& snapshot) {
+  if (snapshot.estimated_filament_weight_g <= 0.0f) {
+    return {};
   }
-  return text;
+  char fila[24] = {};
+  if (snapshot.estimated_filament_weight_g >= 1000.0f) {
+    std::snprintf(fila, sizeof(fila), "%.2fkg",
+                  snapshot.estimated_filament_weight_g / 1000.0f);
+  } else {
+    std::snprintf(fila, sizeof(fila), "%.0fg",
+                  snapshot.estimated_filament_weight_g);
+  }
+  return std::string(fila);
 }
 
 std::string remaining_text(const PrinterSnapshot& snapshot) {
@@ -1146,23 +1181,6 @@ bool should_show_logo(const PrinterSnapshot& snapshot) {
   }
 }
 
-void dot_pulse_exec_cb(void* obj, int32_t val) {
-  lv_obj_set_style_bg_opa(static_cast<lv_obj_t*>(obj), static_cast<lv_opa_t>(val), 0);
-}
-
-void start_dot_pulse(lv_obj_t* dot) {
-  lv_anim_t a;
-  lv_anim_init(&a);
-  lv_anim_set_var(&a, dot);
-  lv_anim_set_exec_cb(&a, dot_pulse_exec_cb);
-  lv_anim_set_values(&a, kDotPulseOpaMin, kDotPulseOpaMax);
-  lv_anim_set_duration(&a, kDotPulseDurationMs);
-  lv_anim_set_reverse_duration(&a, kDotPulseDurationMs);
-  lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-  lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
-  lv_anim_start(&a);
-}
-
 // Micro-interaction: uniform scale on card tap (256 = 100% in LVGL 9)
 void card_scale_exec_cb(void* obj, int32_t val) {
   lv_obj_set_style_transform_scale(static_cast<lv_obj_t*>(obj), val, 0);
@@ -1196,16 +1214,30 @@ esp_err_t Ui::initialize() {
 
   bsp_display_cfg_t display_cfg = {
       .lv_adapter_cfg = []() {
-        esp_lv_adapter_config_t cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
-        // Pin LVGL render task to core 1 so WiFi/BT on core 0 can't interrupt rendering.
-        cfg.task_core_id = 1;
-        return cfg;
+        // Same defaults as ESP_LV_ADAPTER_DEFAULT_CONFIG(), with callbacks
+        // explicitly zeroed to avoid -Wmissing-field-initializers in 0.5.3.
+        return esp_lv_adapter_config_t{
+            .task_stack_size = ESP_LV_ADAPTER_DEFAULT_STACK_SIZE,
+            .task_priority = ESP_LV_ADAPTER_DEFAULT_TASK_PRIORITY,
+            // Pin LVGL render task to core 1 so WiFi/BT on core 0 can't interrupt rendering.
+            .task_core_id = 1,
+            .tick_period_ms = ESP_LV_ADAPTER_DEFAULT_TICK_PERIOD_MS,
+            .task_min_delay_ms = ESP_LV_ADAPTER_DEFAULT_TASK_MIN_DELAY_MS,
+            .task_max_delay_ms = ESP_LV_ADAPTER_DEFAULT_TASK_MAX_DELAY_MS,
+            .stack_in_psram = false,
+            .auto_sleep = {
+                .enable = false,
+                .mode = ESP_LV_ADAPTER_AUTO_SLEEP_MODE_DISABLED,
+                .idle_timeout_ms = ESP_LV_ADAPTER_DEFAULT_AUTO_SLEEP_TIMEOUT_MS,
+                .callbacks = {},
+            },
+        };
       }(),
       .rotation = ESP_LV_ADAPTER_ROTATE_0,
-      // TE_SYNC is safe again: managed_components/espressif__esp_lvgl_adapter
-      // is locally patched to use bounded timeouts in te_sync_wait_for_vsync()
-      // and the SPI TX-done notify (lvgl_bridge_v9.c). Without TE on this
-      // panel + adapter v0.4.2, single PSRAM buffer tears badly and the
+      // TE_SYNC is safe again with esp_lvgl_adapter 0.5.3 plus our bounded
+      // TX-done wait patch. Upstream bounds the TE wait and clears stale
+      // SPI TX-done notifications before draw. Without TE on this panel, a
+      // single PSRAM buffer tears badly and the
       // unbounded LVGL flush rate steals CPU/PSRAM-bus from mbedTLS, which
       // causes printer-MQTT TLS handshakes to time out (select() timeout).
       .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC,
@@ -1540,10 +1572,6 @@ void Ui::rebuild_printer_cards_locked(const std::vector<PrinterCardInfo>& cards)
     lv_obj_set_style_border_width(dot, 0, 0);
     lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
-    if (info.connected) {
-      start_dot_pulse(dot);
-    }
-
     // Printer name (bold, larger)
     lv_obj_t* name_lbl = lv_label_create(card);
     const std::string display_name = info.name.empty() ? info.model : info.name;
@@ -1648,6 +1676,9 @@ void Ui::apply_snapshot(const PrinterSnapshot& snapshot) {
     return;
   }
   if (scrolling_) {
+    last_snapshot_ = snapshot;
+    deferred_snapshot_ = snapshot;
+    deferred_snapshot_pending_ = true;
     return;
   }
 
@@ -1787,7 +1818,9 @@ bool Ui::ensure_preview_image_loaded_locked(
   }
 
   if (last_preview_raw_ && !last_preview_raw_->empty()) {
-    lv_image_set_src(page2_image_, &preview_image_dsc_);
+    // Source is already installed for this decoded blob. Re-setting it on
+    // every status tick invalidates the full 320px image and can starve other
+    // tasks trying to acquire the LVGL lock.
     return true;
   }
 
@@ -1818,6 +1851,7 @@ void Ui::release_preview_image_locked() {
 void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_refresh,
                                std::shared_ptr<std::vector<uint8_t>> pre_decoded_raw,
                                const lv_image_dsc_t* pre_decoded_dsc) {
+  LvglLockGuard::note_phase("enter");
   deferred_snapshot_pending_ = false;
   update_page_availability_locked(snapshot);
 
@@ -1838,8 +1872,10 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
 
   // Always apply ring visual — it manages lv_anim transitions internally
   // and only restarts animations when the kind actually changes.
+  LvglLockGuard::note_phase("ring_visual");
   apply_ring_visual_locked(snapshot);
 
+  LvglLockGuard::note_phase("labels");
   char progress_buffer[8] = {};
   std::snprintf(progress_buffer, sizeof(progress_buffer), "%d%%", progress);
   set_label_text_if_changed(progress_label_, progress_buffer);
@@ -1888,12 +1924,26 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   const std::string layer = layer_text(snapshot);
   set_label_text_if_changed(layer_label_, layer);
 
+  // Drive the optional spool icon + grams text alongside the layer counter
+  // (siblings inside layer_row_, hidden when no slicer estimate is known).
+  const std::string filament = filament_estimate_text(snapshot);
+  const bool has_filament_estimate = !filament.empty();
+  // The spool icon (U+F1097) maps to the wrong glyph in the embedded MDI font
+  // (renders as "human-male-board" instead of a spool). Keep it hidden until
+  // the font is regenerated with the correct codepoint mapping.
+  set_hidden(filament_icon_label_, true);
+  set_hidden(filament_value_label_, !has_filament_estimate);
+  if (has_filament_estimate) {
+    set_label_text_if_changed(filament_value_label_, filament);
+  }
+
   const std::string remaining = show_eta_ ? eta_text(snapshot) : remaining_text(snapshot);
   set_label_text_if_changed(remaining_label_, remaining);
   // Hide the clock-icon prefix in ETA mode — leaves more room for "HH:MM"
   // and avoids the redundant clock-glyph + clock-time stutter.
   set_hidden(remaining_prefix_label_, show_eta_);
 
+  LvglLockGuard::note_phase("temps");
   char temp_buffer[24] = {};
   const bool is_dual_nozzle = snapshot.active_nozzle_index >= 0;
   const char* active_prefix = is_dual_nozzle ? (snapshot.active_nozzle_index == 1 ? "L " : "R ") : "";
@@ -1943,6 +1993,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   set_label_text_if_changed(battery_pct_label_, show_battery ? battery_pct : "");
 
   // --- AMS page rendering ---
+  LvglLockGuard::note_phase("ams");
   const uint8_t ams_count = snapshot.ams ? snapshot.ams->count : 0;
   const uint32_t ams_signature = ams_ui_signature(snapshot);
   const bool ams_visible = scrolling_ ||
@@ -1978,6 +2029,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     apply_ams_error_pulse_locked();
   }
 
+  LvglLockGuard::note_phase("preview_text");
   const std::string preview_note = preview_note_text(snapshot);
   const std::string preview_subnote = preview_subnote_text(snapshot);
   const std::string camera_note = camera_note_text(snapshot);
@@ -1987,6 +2039,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     const bool preview_blob_changed = last_preview_blob_.get() != snapshot.preview_blob.get();
     last_preview_blob_ = snapshot.preview_blob;
     if (active_page_ == kPageIdxPreview) {
+      LvglLockGuard::note_phase("preview_image_load");
       has_preview_image = ensure_preview_image_loaded_locked(
           preview_blob_changed, std::move(pre_decoded_raw), pre_decoded_dsc);
     } else if (preview_blob_changed) {
@@ -2019,16 +2072,12 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   if (!preview_subnote.empty()) {
     set_label_text_if_changed(page2_subnote_, preview_subnote);
   }
-  // Mirror the gating logic from detail_label_: only run the marquee
-  // animation when page 2 is actually settled and visible. On every other
-  // page the subnote contributes nothing yet still triggers per-frame
-  // widget invalidations under SCROLL_CIRCULAR. Switching to WRAP when the
-  // user is on a different page eliminates that idle-time lock pressure.
+  // Avoid LV_LABEL_LONG_SCROLL_CIRCULAR here. It is a permanent LVGL animation
+  // and on the preview page it competes with large image redraws under the
+  // display lock. Use a static dotted title instead.
   {
-    const bool preview_visible =
-        !scrolling_ && active_page_ == kPageIdxPreview && !preview_subnote.empty();
-    const lv_label_long_mode_t desired =
-        preview_visible ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_WRAP;
+    const bool image_title = active_page_ == kPageIdxPreview && has_page2_image;
+    const lv_label_long_mode_t desired = image_title ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP;
     if (lv_label_get_long_mode(page2_subnote_) != desired) {
       lv_label_set_long_mode(page2_subnote_, desired);
     }
@@ -2036,6 +2085,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
 
   update_print_buttons_locked(snapshot);
 
+  LvglLockGuard::note_phase("camera");
   bool has_camera_image =
       camera_slot_initialized_ && camera_blobs_[active_camera_slot_] &&
       !camera_blobs_[active_camera_slot_]->empty();
@@ -2843,11 +2893,41 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_set_style_text_color(detail_label_, lv_color_hex(0x94A3B8), 0);
   lv_obj_align(detail_label_, LV_ALIGN_CENTER, 0, 114);
 
-  layer_label_ = lv_label_create(page1_);
+  layer_row_ = lv_obj_create(page1_);
+  make_transparent(layer_row_);
+  lv_obj_set_size(layer_row_, 360, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(layer_row_, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(layer_row_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_align(layer_row_, LV_ALIGN_CENTER, 0, 70);
+  lv_obj_clear_flag(layer_row_, LV_OBJ_FLAG_SCROLLABLE);
+
+  layer_label_ = lv_label_create(layer_row_);
   set_label_text_if_changed(layer_label_, "Layer: -- / --");
   lv_obj_set_style_text_font(layer_label_, dosis32, 0);
   lv_obj_set_style_text_color(layer_label_, lv_color_hex(0xDDDDDD), 0);
-  lv_obj_align(layer_label_, LV_ALIGN_CENTER, 0, 70);
+
+  // Filament estimate (icon + grams) appears on the right of the layer row
+  // when the cloud history exposes a slicer weight estimate. Both children
+  // are hidden by default and only shown by apply_snapshot_locked() when an
+  // estimate is available so the row stays cleanly centered around the
+  // layer counter when no estimate is known.
+  filament_icon_label_ = lv_label_create(layer_row_);
+  set_label_text_if_changed(filament_icon_label_, kMdiSpool);
+  lv_obj_set_style_text_font(filament_icon_label_, mdi40, 0);
+  lv_obj_set_style_text_color(filament_icon_label_, lv_color_hex(0xC9A227), 0);
+  lv_obj_set_style_pad_left(filament_icon_label_, 14, 0);
+  lv_obj_set_style_pad_right(filament_icon_label_, 4, 0);
+  lv_obj_add_flag(filament_icon_label_, LV_OBJ_FLAG_HIDDEN);
+
+  filament_value_label_ = lv_label_create(layer_row_);
+  set_label_text_if_changed(filament_value_label_, "");
+  lv_obj_set_style_text_font(filament_value_label_, dosis32, 0);
+  lv_obj_set_style_text_color(filament_value_label_, lv_color_hex(0xDDDDDD), 0);
+  // Add a left pad so the value sits a sensible distance from the layer
+  // counter now that the spool icon is hidden.
+  lv_obj_set_style_pad_left(filament_value_label_, 14, 0);
+  lv_obj_add_flag(filament_value_label_, LV_OBJ_FLAG_HIDDEN);
 
   nozzle_prefix_label_ = lv_label_create(page1_);
   set_label_text_if_changed(nozzle_prefix_label_, kMdiNozzle);
@@ -3007,7 +3087,7 @@ esp_err_t Ui::build_dashboard() {
   page2_subnote_ = lv_label_create(page2_);
   set_label_text_if_changed(page2_subnote_, "");
   lv_obj_set_width(page2_subnote_, 320);
-  lv_label_set_long_mode(page2_subnote_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+  lv_label_set_long_mode(page2_subnote_, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(page2_subnote_, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_font(page2_subnote_, info20, 0);
   lv_obj_set_style_text_color(page2_subnote_, lv_color_hex(0x888888), 0);
@@ -3096,6 +3176,7 @@ esp_err_t Ui::build_dashboard() {
 
   active_page_ = kPageIdxMain;
   scrolling_ = false;
+  publish_page_state_snapshot();
   deferred_snapshot_pending_ = false;
   detail_visible_ = true;
   show_logo_ = false;
@@ -3108,6 +3189,7 @@ esp_err_t Ui::build_dashboard() {
 }
 
 void Ui::apply_page_visibility() {
+  LvglLockGuard::note_phase("page_visibility");
   // Page content labels are children of their respective page objects which live
   // inside the horizontally-scrolling pager.  LVGL clips children that are
   // outside the visible viewport, so we do NOT need to hide page-1/2/3 content
@@ -3132,7 +3214,7 @@ void Ui::apply_page_visibility() {
   set_hidden(page3_, !camera_page_available_);
   set_hidden(status_label_, !on_page1);
   set_hidden(detail_label_, !on_page1 || !detail_visible_ || show_portal_hint);
-  set_hidden(layer_label_, !on_page1);
+  set_hidden(layer_row_, !on_page1);
   set_hidden(nozzle_prefix_label_, !on_page1);
   set_hidden(nozzle_value_label_, !on_page1);
   set_hidden(nozzle_aux_label_, !on_page1 || !nozzle_aux_visible_);
@@ -3225,6 +3307,7 @@ void Ui::update_page_availability_locked(const PrinterSnapshot& snapshot) {
     lv_obj_scroll_to_view(target_page, LV_ANIM_OFF);
   }
   scrolling_ = false;
+  publish_page_state_snapshot();
   apply_page0_parallax(true);
   // Ring timer resume is handled by apply_ring_visual_locked via apply_snapshot.
 }
@@ -3344,7 +3427,13 @@ void Ui::set_active_page(int page) {
   if (active_page_ == kPageIdxPreview) {
     preview_image_visible_ = ensure_preview_image_loaded_locked(false);
   }
+  if (previous_page != clamped_page && active_page_ == kPageIdxCamera &&
+      camera_page_available_) {
+    std::lock_guard<std::mutex> lock(camera_refresh_mutex_);
+    camera_refresh_requested_ = true;
+  }
   scrolling_ = false;
+  publish_page_state_snapshot();
   apply_page0_parallax(true);
   // Ring timer resume is handled by apply_ring_visual_locked below.
   apply_page_visibility();
@@ -3376,8 +3465,14 @@ void Ui::set_pager_scroll_locked(bool locked) {
     lv_obj_scroll_to_x(pager_, target_x, LV_ANIM_OFF);
   }
   scrolling_ = false;
+  publish_page_state_snapshot();
   apply_page0_parallax(true);
   apply_page_visibility();
+}
+
+void Ui::publish_page_state_snapshot() {
+  active_page_snapshot_.store(active_page_, std::memory_order_relaxed);
+  page_scrolling_snapshot_.store(scrolling_, std::memory_order_relaxed);
 }
 
 void Ui::handle_pager_event(lv_event_t* event) {
@@ -3398,6 +3493,7 @@ void Ui::handle_pager_event(lv_event_t* event) {
 
   if (code == LV_EVENT_SCROLL_BEGIN) {
     scrolling_ = true;
+    publish_page_state_snapshot();
 
     apply_page_visibility();
     return;
@@ -3702,7 +3798,7 @@ void Ui::apply_brightness_policy() {
   bsp_display_brightness_set(target_brightness);
 }
 
-void Ui::update_power_save(bool on_battery, bool print_active) {
+void Ui::update_power_save(bool on_battery, bool keep_awake) {
   const uint32_t now = lv_tick_get();
   const uint32_t idle_ms = now - last_activity_tick_ms_.load();
 
@@ -3715,15 +3811,15 @@ void Ui::update_power_save(bool on_battery, bool print_active) {
     return;               // re-evaluate on next call with fresh idle_ms
   }
 
-  const uint32_t dim_timeout = (print_active
+  const uint32_t dim_timeout = (keep_awake
       ? battery_display_policy_.dim_timeout_active_s
       : battery_display_policy_.dim_timeout_idle_s) * 1000U;
-  const uint32_t off_timeout = (print_active
+  const uint32_t off_timeout = (keep_awake
       ? battery_display_policy_.off_timeout_active_s
       : battery_display_policy_.off_timeout_idle_s) * 1000U;
 
   ScreenPowerMode target_mode = ScreenPowerMode::kAwake;
-  if (on_battery || battery_display_policy_.usb_power_save_enabled) {
+  if (!keep_awake && (on_battery || battery_display_policy_.usb_power_save_enabled)) {
     if (battery_display_policy_.screen_off_enabled && idle_ms >= off_timeout) {
       target_mode = ScreenPowerMode::kOff;
     } else if (battery_display_policy_.dim_enabled && idle_ms >= dim_timeout) {

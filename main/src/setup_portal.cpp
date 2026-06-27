@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1011,7 +1012,7 @@ esp_err_t SetupPortal::start() {
   config.server_port = 80;
   config.stack_size = 12288;  // 8192 was too small — handle_root builds ~40KB HTML on the stack
   // Leave some headroom for portal endpoints so feature additions do not silently exhaust slots.
-  config.max_uri_handlers = 28;
+  config.max_uri_handlers = 32;
   config.recv_wait_timeout = 30;
 
   ESP_RETURN_ON_ERROR(httpd_start(&server_, &config), kTag, "httpd_start failed");
@@ -1142,6 +1143,30 @@ esp_err_t SetupPortal::start() {
   audio_uri.user_ctx = this;
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &audio_uri), kTag,
                       "audio handler failed");
+
+  httpd_uri_t audio_event_uri = {};
+  audio_event_uri.uri = "/api/audio/event";
+  audio_event_uri.method = HTTP_POST;
+  audio_event_uri.handler = &SetupPortal::handle_audio_event_post;
+  audio_event_uri.user_ctx = this;
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &audio_event_uri), kTag,
+                      "audio event handler failed");
+
+  httpd_uri_t audio_upload_uri = {};
+  audio_upload_uri.uri = "/api/audio/upload";
+  audio_upload_uri.method = HTTP_POST;
+  audio_upload_uri.handler = &SetupPortal::handle_audio_upload;
+  audio_upload_uri.user_ctx = this;
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &audio_upload_uri), kTag,
+                      "audio upload handler failed");
+
+  httpd_uri_t audio_clear_uri = {};
+  audio_clear_uri.uri = "/api/audio/clear";
+  audio_clear_uri.method = HTTP_POST;
+  audio_clear_uri.handler = &SetupPortal::handle_audio_clear;
+  audio_clear_uri.user_ctx = this;
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &audio_clear_uri), kTag,
+                      "audio clear handler failed");
 
   httpd_uri_t cloud_connect_uri = {};
   cloud_connect_uri.uri = "/api/cloud/connect";
@@ -1554,7 +1579,13 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           ".grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;}"
           ".field{display:grid;gap:8px;} .actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;}"
           ".actions .micro{min-width:220px;} .color-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;}"
-          ".color-grid input{min-height:54px;padding:6px 10px;background:#0c131b;}";
+          ".color-grid input{min-height:54px;padding:6px 10px;background:#0c131b;}"
+          "input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:6px;background:#1e3347;"
+          "border-radius:3px;border:none;padding:0;cursor:pointer;}"
+          "input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;"
+          "border-radius:50%;background:#94a3b8;cursor:pointer;}"
+          "input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#94a3b8;"
+          "cursor:pointer;border:none;}";
   html += ".status-line{font-size:16px;font-weight:700;} .status-detail{color:var(--muted);}"
           ".hidden{display:none !important;}";
   html += ".printer-card{padding:16px 18px;border-radius:18px;border:1px solid var(--line);background:#0f1721;"
@@ -1972,12 +2003,76 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
       html += "<span id=\"audio_volume_value\">";
       html += std::to_string(audio_volume_cfg);
       html += "%</span>)</label>";
-      html += "<input type=\"range\" id=\"audio_volume\" min=\"0\" max=\"100\" step=\"5\" value=\"";
+      html += "<input type=\"range\" id=\"audio_volume\" min=\"0\" max=\"100\" step=\"1\" value=\"";
       html += std::to_string(audio_volume_cfg);
       html += "\" oninput=\"document.getElementById('audio_volume_value').textContent=this.value+'%';\"></div>";
       html += "<div class=\"actions\"><button type=\"button\" class=\"primary\" id=\"audio-apply-button\">Save</button>";
       html += "<button type=\"button\" id=\"audio-test-button\">Test sound</button>";
       html += "<div class=\"micro\" id=\"audio-apply-hint\">Applies live, no restart required.</div></div>";
+
+      // Per-event customization table
+      static const struct { const char* name; const char* desc; } kEvents[] = {
+        {"Print Started",    "Printing begins"},
+        {"Print Finished",   "Print completed successfully"},
+        {"Print Error",      "Error detected"},
+        {"HMS Alert",        "Health / maintenance warning"},
+        {"Print Paused",     "Print paused (manual or filament)"},
+        {"Filament Change",  "AMS filament change / runout"},
+        {"Reconnect",        "Connection recovered after failure"},
+        {"Click",            "UI tap feedback"},
+      };
+      html += "<div class=\"field\"><label>Per-Event Sounds</label></div>";
+      html += "<table style=\"width:100%;border-collapse:collapse;font-size:0.85em;\">";
+      html += "<thead><tr style=\"text-align:left;\">"
+              "<th style=\"padding:4px 6px;\">Event</th>"
+              "<th style=\"padding:4px 6px;\">Enable</th>"
+              "<th style=\"padding:4px 6px;\">Sound</th>"
+              "<th style=\"padding:4px 6px;\"></th>"
+              "</tr></thead><tbody>";
+      for (int i = 0; i < 8; ++i) {
+        const bool ev_en = portal->config_store_.load_audio_event_enabled(static_cast<uint8_t>(i));
+        const bool has_pcm = portal->config_store_.has_audio_event_pcm(static_cast<uint8_t>(i));
+        const std::string stored_name = has_pcm
+            ? portal->config_store_.load_audio_event_filename(static_cast<uint8_t>(i))
+            : std::string{};
+        html += "<tr data-event=\"";
+        html += std::to_string(i);
+        html += "\" style=\"border-top:1px solid #333;\"><td style=\"padding:4px 6px;\">";
+        html += kEvents[i].name;
+        html += "<br><span style=\"color:#888;font-size:0.85em;\">";
+        html += kEvents[i].desc;
+        html += "</span></td><td style=\"padding:4px 6px;\">";
+        html += "<input type=\"checkbox\" id=\"sev_chk_";
+        html += std::to_string(i);
+        html += "\"";
+        if (ev_en) html += " checked";
+        html += "></td><td style=\"padding:4px 6px;\"><span id=\"sev_sound_";
+        html += std::to_string(i);
+        html += "\">";
+        if (has_pcm) {
+          html += stored_name.empty() ? "Custom" : stored_name;
+        } else {
+          html += "Built-in";
+        }
+        html += "</span></td>";
+        html += "<td style=\"padding:4px 6px;white-space:nowrap;\">";
+        html += "<label style=\"cursor:pointer;background:#333;border:1px solid #555;border-radius:4px;padding:3px 8px;font-size:0.85em;\">"
+                "Upload<input type=\"file\" id=\"sev_file_";
+        html += std::to_string(i);
+        html += "\" accept=\".wav\" style=\"display:none;\"></label> ";
+        html += "<button type=\"button\" id=\"sev_clear_";
+        html += std::to_string(i);
+        html += "\"";
+        if (!has_pcm) html += " class=\"hidden\"";
+        html += " style=\"font-size:0.85em;\">Clear</button> ";
+        html += "<button type=\"button\" id=\"sev_test_";
+        html += std::to_string(i);
+        html += "\" style=\"font-size:0.85em;\">Test</button></td></tr>";
+      }
+      html += "</tbody></table>";
+      html += "<div class=\"micro\" style=\"margin-top:6px;\">WAV: 16 kHz, 16-bit, mono, max 10 s. "
+              "Custom sounds replace built-in tones for that event.</div>";
+
       end_settings_panel();
     }
 
@@ -2749,6 +2844,49 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
               "audioTest.disabled=true;"
               "await audioPost({audio_enabled,audio_volume,test:true}).catch(()=>{});"
               "setTimeout(()=>{audioTest.disabled=false;},900);});}}";
+  // Per-event audio customization JS
+  html += "{const kEvCnt=8;"
+          "async function setEvEnabled(idx,en){"
+              "const r=await fetch('/api/audio/event',{method:'POST',headers:{'Content-Type':'application/json'},"
+              "body:JSON.stringify({event:idx,enabled:en})});return r.ok;}"
+          "async function clearEvSound(idx){"
+              "const r=await fetch('/api/audio/clear',{method:'POST',headers:{'Content-Type':'application/json'},"
+              "body:JSON.stringify({event:idx})});return r.ok;}"
+          "async function testEv(idx){"
+              "const vol=document.getElementById('audio_volume');"
+              "const v=vol?Number(vol.value):60;"
+              "await fetch('/api/audio',{method:'POST',headers:{'Content-Type':'application/json'},"
+              "body:JSON.stringify({audio_enabled:true,audio_volume:v,test_event:idx})}).catch(()=>{});}"
+          "for(let i=0;i<kEvCnt;i++){"
+              "const chk=document.getElementById('sev_chk_'+i);"
+              "const fi=document.getElementById('sev_file_'+i);"
+              "const clr=document.getElementById('sev_clear_'+i);"
+              "const tst=document.getElementById('sev_test_'+i);"
+              "const lbl=document.getElementById('sev_sound_'+i);"
+              "if(chk)chk.addEventListener('change',((idx)=>async()=>{"
+                  "const ok=await setEvEnabled(idx,chk.checked);"
+                  "if(!ok)chk.checked=!chk.checked;})(i));"
+              "if(fi)fi.addEventListener('change',((idx)=>async()=>{"
+                  "const f=fi.files[0];if(!f)return;"
+                  "setStatus('Uploading sound...','Sending WAV to PrintSphere.',6000);"
+                  "const buf=await f.arrayBuffer();"
+                  "const fn=f.name.replace(/\\.[^.]+$/,'');"
+                  "const shortName=fn.length>7?fn.slice(0,7)+'\u2026':fn;"
+                  "const r=await fetch('/api/audio/upload?event='+idx+'&name='+encodeURIComponent(shortName),{method:'POST',"
+                      "headers:{'Content-Type':'audio/wav'},body:buf}).catch(()=>({ok:false,json:()=>({})}));"
+                  "const body=await r.json().catch(()=>({}));"
+                  "if(r.ok){"
+                      "if(lbl)lbl.textContent=shortName;"
+                      "if(clr)clr.classList.remove('hidden');"
+                      "setStatus('Sound uploaded.','',3000);"
+                  "}else{setStatus(body.error||'Upload failed',body.detail||'Check WAV: 16 kHz 16-bit mono.',8000);}"
+                  "fi.value='';})(i));"
+              "if(clr)clr.addEventListener('click',((idx)=>async()=>{"
+                  "const ok=await clearEvSound(idx);"
+                  "if(ok){if(lbl)lbl.textContent='Built-in';clr.classList.add('hidden');}})(i));"
+              "if(tst)tst.addEventListener('click',((idx)=>async()=>{"
+                  "tst.disabled=true;await testEv(idx);"
+                  "setTimeout(()=>{tst.disabled=false;},1200);})(i));}}";
   html += "if(batDimSelect){batDimSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batDimBrightnessSelect){batDimBrightnessSelect.addEventListener('change',updateBatDisplayControls);}";
   html += "if(batOffSelect){batOffSelect.addEventListener('change',updateBatDisplayControls);}";
@@ -3777,6 +3915,16 @@ esp_err_t SetupPortal::handle_audio_post(httpd_req_t* request) {
     }
   }
   const bool play_test = read_bool_field(root, "test", false);
+  int test_event_idx = -1;
+  {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, "test_event");
+    if (cJSON_IsNumber(item)) {
+      const long v = static_cast<long>(item->valuedouble);
+      if (v >= 0 && v < static_cast<long>(AudioNotifier::kEventCount)) {
+        test_event_idx = static_cast<int>(v);
+      }
+    }
+  }
   cJSON_Delete(root);
 
   ESP_LOGI(kTag, "Saving audio: enabled=%d volume=%d test=%d",
@@ -3792,8 +3940,268 @@ esp_err_t SetupPortal::handle_audio_post(httpd_req_t* request) {
   if (play_test) {
     portal->audio_notifier_.play_test();
   }
+  if (test_event_idx >= 0) {
+    portal->audio_notifier_.play_test_event(
+        static_cast<AudioNotifier::Event>(test_event_idx));
+  }
 
   send_json(request, "{\"status\":\"saved\"}");
+  return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Audio event enable/disable  POST /api/audio/event
+// ---------------------------------------------------------------------------
+
+esp_err_t SetupPortal::handle_audio_event_post(httpd_req_t* request) {
+  auto* portal = static_cast<SetupPortal*>(request->user_ctx);
+  if (portal == nullptr) return ESP_FAIL;
+  if (!portal->is_request_authorized(request)) return portal->send_locked_response(request);
+
+  cJSON* root = nullptr;
+  esp_err_t parse_err = receive_json_body(request, &root);
+  if (parse_err != ESP_OK) return parse_err;
+
+  const cJSON* event_item = cJSON_GetObjectItemCaseSensitive(root, "event");
+  const cJSON* enabled_item = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+  if (!cJSON_IsNumber(event_item) || !cJSON_IsBool(enabled_item)) {
+    cJSON_Delete(root);
+    return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "event and enabled required");
+  }
+
+  const int event_idx = static_cast<int>(event_item->valuedouble);
+  const bool enabled = cJSON_IsTrue(enabled_item);
+  cJSON_Delete(root);
+
+  if (event_idx < 0 || event_idx >= static_cast<int>(AudioNotifier::kEventCount)) {
+    return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "event out of range");
+  }
+
+  ESP_LOGI(kTag, "Audio event %d enabled=%d", event_idx, enabled ? 1 : 0);
+  ESP_RETURN_ON_ERROR(
+      portal->config_store_.save_audio_event_enabled(static_cast<uint8_t>(event_idx), enabled),
+      kTag, "save event enabled failed");
+  portal->audio_notifier_.set_event_enabled(
+      static_cast<AudioNotifier::Event>(event_idx), enabled);
+
+  send_json(request, "{\"status\":\"saved\"}");
+  return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// WAV upload for a specific event  POST /api/audio/upload?event=N
+// WAV must be 16 kHz, 16-bit, mono PCM. Max body 32 KB + header.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Extract the query-string value of parameter `param` from the request URI.
+// Returns -1 if not found or not a valid integer.
+int uri_query_int(httpd_req_t* req, const char* param) {
+  char buf[64] = {};
+  if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) != ESP_OK) return -1;
+  char val[16] = {};
+  if (httpd_query_key_value(buf, param, val, sizeof(val)) != ESP_OK) return -1;
+  char* end = nullptr;
+  const long v = std::strtol(val, &end, 10);
+  if (end == val || *end != '\0') return -1;
+  return static_cast<int>(v);
+}
+
+// Extract a string query parameter from a request URI. Returns empty string if absent.
+std::string uri_query_str(httpd_req_t* req, const char* param) {
+  char buf[128] = {};
+  if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) != ESP_OK) return {};
+  char val[64] = {};
+  if (httpd_query_key_value(buf, param, val, sizeof(val)) != ESP_OK) return {};
+  return std::string(val);
+}
+
+constexpr size_t kMaxWavBody = 320000 + 100;  // 10 s @ 16 kHz 16-bit + generous header
+constexpr size_t kMinUploadPcmSamples = 16000 / 50;  // 20 ms
+constexpr int kMinUploadPcmPeak = 96;
+
+// Receive a raw binary body up to max_bytes into `out`. Returns ESP_OK or
+// sends an HTTP error response and returns the error code.
+esp_err_t receive_binary_body(httpd_req_t* request, std::vector<uint8_t>& out,
+                               size_t max_bytes) {
+  if (request->content_len <= 0 ||
+      request->content_len > static_cast<int>(max_bytes)) {
+    return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid body length");
+  }
+  out.resize(static_cast<size_t>(request->content_len));
+  int received = 0;
+  while (received < request->content_len) {
+    const int ret = httpd_req_recv(request, reinterpret_cast<char*>(out.data()) + received,
+                                   request->content_len - received);
+    if (ret <= 0) {
+      return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "body read failed");
+    }
+    received += ret;
+  }
+  return ESP_OK;
+}
+
+bool pcm_upload_is_playable(const std::vector<int16_t>& samples) {
+  if (samples.size() < kMinUploadPcmSamples) {
+    return false;
+  }
+  int peak = 0;
+  for (const int16_t sample : samples) {
+    const int value = sample < 0 ? -static_cast<int>(sample) : static_cast<int>(sample);
+    if (value > peak) {
+      peak = value;
+    }
+  }
+  return peak >= kMinUploadPcmPeak;
+}
+
+// Minimal RIFF/WAV parser. Accepts only mono 16-bit 16 kHz PCM WAV.
+// Extracts the raw int16_t samples into `samples_out`.
+bool parse_wav_pcm(const uint8_t* data, size_t len, std::vector<int16_t>& samples_out,
+                   std::string& error_out) {
+  if (len < 44) { error_out = "file too small"; return false; }
+  if (std::memcmp(data, "RIFF", 4) != 0 || std::memcmp(data + 8, "WAVE", 4) != 0) {
+    error_out = "not a WAV file";
+    return false;
+  }
+
+  uint16_t audio_format = 0, channels = 0, bits_per_sample = 0;
+  uint32_t sample_rate = 0;
+  const uint8_t* pcm_data = nullptr;
+  size_t pcm_bytes = 0;
+
+  size_t pos = 12;
+  while (pos + 8 <= len) {
+    uint32_t chunk_size = 0;
+    std::memcpy(&chunk_size, data + pos + 4, 4);
+    if (std::memcmp(data + pos, "fmt ", 4) == 0 && chunk_size >= 16) {
+      std::memcpy(&audio_format, data + pos + 8, 2);
+      std::memcpy(&channels, data + pos + 10, 2);
+      std::memcpy(&sample_rate, data + pos + 12, 4);
+      std::memcpy(&bits_per_sample, data + pos + 22, 2);
+    } else if (std::memcmp(data + pos, "data", 4) == 0) {
+      if (pos + 8 <= len) {
+        pcm_data = data + pos + 8;
+        pcm_bytes = std::min(static_cast<size_t>(chunk_size), len - pos - 8);
+      }
+    }
+    pos += 8 + chunk_size;
+    if (chunk_size & 1U) pos++;  // RIFF pads odd-length chunks to 2-byte boundary
+    if (pos == 0) break;  // guard against chunk_size wrap
+  }
+
+  if (pcm_data == nullptr) { error_out = "data chunk not found"; return false; }
+  if (audio_format != 1)   { error_out = "only PCM WAV supported (format=1)"; return false; }
+  if (channels != 1)       { error_out = "only mono WAV supported (channels=1)"; return false; }
+  if (sample_rate != 16000) { error_out = "only 16000 Hz WAV supported"; return false; }
+  if (bits_per_sample != 16) { error_out = "only 16-bit WAV supported"; return false; }
+
+  const size_t sample_count = pcm_bytes / sizeof(int16_t);
+  if (sample_count == 0) { error_out = "empty audio data"; return false; }
+
+  samples_out.resize(sample_count);
+  std::memcpy(samples_out.data(), pcm_data, sample_count * sizeof(int16_t));
+  if (!pcm_upload_is_playable(samples_out)) {
+    samples_out.clear();
+    error_out = "audio too short or silent";
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+esp_err_t SetupPortal::handle_audio_upload(httpd_req_t* request) {
+  auto* portal = static_cast<SetupPortal*>(request->user_ctx);
+  if (portal == nullptr) return ESP_FAIL;
+  if (!portal->is_request_authorized(request)) return portal->send_locked_response(request);
+
+  const int event_idx = uri_query_int(request, "event");
+  if (event_idx < 0 || event_idx >= static_cast<int>(AudioNotifier::kEventCount)) {
+    return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "missing or invalid event param");
+  }
+
+  // Optional display name from the "name" query param (already trimmed to 7 chars by the client).
+  std::string display_name = uri_query_str(request, "name");
+  if (display_name.size() > 8) display_name.resize(8);  // hard cap server-side
+
+  std::vector<uint8_t> body;
+  esp_err_t recv_err = receive_binary_body(request, body, kMaxWavBody);
+  if (recv_err != ESP_OK) return recv_err;
+
+  std::vector<int16_t> samples;
+  std::string parse_error;
+  if (!parse_wav_pcm(body.data(), body.size(), samples, parse_error)) {
+    ESP_LOGW(kTag, "WAV parse failed for event %d: %s", event_idx, parse_error.c_str());
+    std::string err_json = "{\"error\":\"Invalid WAV: ";
+    err_json += parse_error;
+    err_json += "\",\"detail\":\"Upload a mono 16-bit 16000 Hz PCM WAV file.\"}";
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_status(request, "400 Bad Request");
+    httpd_resp_sendstr(request, err_json.c_str());
+    return ESP_OK;
+  }
+
+  const size_t pcm_bytes = samples.size() * sizeof(int16_t);
+  ESP_LOGI(kTag, "WAV upload event %d: %zu samples (%.2f s)",
+           event_idx, samples.size(),
+           static_cast<float>(samples.size()) / 16000.0f);
+
+  const esp_err_t save_err = portal->config_store_.save_audio_event_pcm(
+      static_cast<uint8_t>(event_idx),
+      reinterpret_cast<const uint8_t*>(samples.data()), pcm_bytes);
+  if (save_err != ESP_OK) {
+    ESP_LOGE(kTag, "save_audio_event_pcm failed: %s", esp_err_to_name(save_err));
+    return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
+                               "NVS write failed");
+  }
+
+  portal->audio_notifier_.set_event_pcm(
+      static_cast<AudioNotifier::Event>(event_idx), std::move(samples));
+
+  // Persist the display name so it survives reboots.
+  if (!display_name.empty()) {
+    portal->config_store_.save_audio_event_filename(
+        static_cast<uint8_t>(event_idx), display_name);
+  }
+
+  send_json(request, "{\"status\":\"saved\"}");
+  return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Clear custom sound  POST /api/audio/clear  {"event": N}
+// ---------------------------------------------------------------------------
+
+esp_err_t SetupPortal::handle_audio_clear(httpd_req_t* request) {
+  auto* portal = static_cast<SetupPortal*>(request->user_ctx);
+  if (portal == nullptr) return ESP_FAIL;
+  if (!portal->is_request_authorized(request)) return portal->send_locked_response(request);
+
+  cJSON* root = nullptr;
+  esp_err_t parse_err = receive_json_body(request, &root);
+  if (parse_err != ESP_OK) return parse_err;
+
+  const cJSON* event_item = cJSON_GetObjectItemCaseSensitive(root, "event");
+  if (!cJSON_IsNumber(event_item)) {
+    cJSON_Delete(root);
+    return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "event required");
+  }
+
+  const int event_idx = static_cast<int>(event_item->valuedouble);
+  cJSON_Delete(root);
+
+  if (event_idx < 0 || event_idx >= static_cast<int>(AudioNotifier::kEventCount)) {
+    return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "event out of range");
+  }
+
+  ESP_LOGI(kTag, "Clearing custom sound for event %d", event_idx);
+  portal->config_store_.clear_audio_event_pcm(static_cast<uint8_t>(event_idx));
+  portal->config_store_.save_audio_event_filename(static_cast<uint8_t>(event_idx), "");
+  portal->audio_notifier_.clear_event_pcm(static_cast<AudioNotifier::Event>(event_idx));
+
+  send_json(request, "{\"status\":\"cleared\"}");
   return ESP_OK;
 }
 

@@ -375,7 +375,7 @@
               </div>
               <div class="fact">
                 <span>Version</span>
-                <strong id="firmware-version">v1.5.1</strong>
+                <strong id="firmware-version">v1.6</strong>
               </div>
               <div class="fact">
                 <span>Flash offset</span>
@@ -407,7 +407,7 @@
               alt="PrintSphere circular display device"
             >
             <div class="caption">
-              <strong id="caption-version">Stable v1.5.1</strong>
+              <strong id="caption-version">Stable v1.6</strong>
               <span id="caption-path">release/initial/printsphere_full.bin</span>
             </div>
           </aside>
@@ -433,20 +433,12 @@
     <script>
       const firmwares = [
         {
-          label: "Stable v1.5.1",
+          label: "Stable v1.6",
           channel: "Stable",
-          version: "v1.5.1",
+          version: "v1.6",
           path: "../release/initial/printsphere_full.bin",
           displayPath: "release/initial/printsphere_full.bin",
-          note: "Recommended for normal setup. Choose this unless you were asked to test a beta.",
-        },
-        {
-          label: "Beta v1.6-rc1",
-          channel: "Beta",
-          version: "v1.6-rc1",
-          path: "../release/beta/archive/printsphere_full-v1.6-rc1.bin",
-          displayPath: "release/beta/archive/printsphere_full-v1.6-rc1.bin",
-          note: "Newest test version. Use this only if you want the latest fixes before stable.",
+          note: "Recommended for normal setup. Devices on v1.5.x or older need this full flash once before OTA updates are used again.",
         },
       ];
 

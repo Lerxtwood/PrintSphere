@@ -11,6 +11,7 @@ tools/*
 !tools/patches/*.ps1
 !tools/package_initial_flash.py
 release/*
+!release/RELEASE_NOTES_v1.6.md
 !release/archive/
 release/archive/*
 !release/archive/firmware-v*.bin
@@ -44,3 +45,6 @@ release/debug/archive/*
 !release/debug/archive/printsphere_ota-v*.bin
 *.pyc
 *.step
+.clangd
+*.bak
+*.old

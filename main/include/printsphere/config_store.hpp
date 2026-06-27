@@ -156,6 +156,20 @@ class ConfigStore {
   esp_err_t save_arc_color_scheme(const ArcColorScheme& colors) const;
   esp_err_t save_battery_display_policy(const BatteryDisplayPolicy& policy) const;
 
+  // Per-event sound settings (event_index matches AudioNotifier::Event order).
+  // Default enable: first 5 events on (Print Started/Finished/Error/HMS/Paused);
+  // Filament Change (5), Reconnect (6), Click (7) default off.
+  bool load_audio_event_enabled(uint8_t event_index) const;
+  esp_err_t save_audio_event_enabled(uint8_t event_index, bool enabled) const;
+  // Raw PCM bytes (16 kHz 16-bit mono int16_t samples). Stored on SPIFFS.
+  bool has_audio_event_pcm(uint8_t event_index) const;
+  std::vector<uint8_t> load_audio_event_pcm(uint8_t event_index) const;
+  esp_err_t save_audio_event_pcm(uint8_t event_index, const uint8_t* data, size_t len) const;
+  esp_err_t clear_audio_event_pcm(uint8_t event_index) const;
+  // Short display name for the uploaded WAV (max 7 chars, no extension).
+  std::string load_audio_event_filename(uint8_t event_index) const;
+  esp_err_t save_audio_event_filename(uint8_t event_index, const std::string& name) const;
+
  private:
   esp_err_t save_string(const char* key, const std::string& value) const;
   std::string load_string(const char* key) const;

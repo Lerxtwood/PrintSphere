@@ -1,9 +1,11 @@
 #include "printsphere/config_store.hpp"
 
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 #include "esp_check.h"
@@ -584,6 +586,114 @@ PrinterProfile ConfigStore::load_active_printer_profile() const {
     if (p.index == active) return p;
   }
   return PrinterProfile{};
+}
+
+// ---------------------------------------------------------------------------
+// Per-event audio settings
+// ---------------------------------------------------------------------------
+
+namespace {
+void event_enable_key(uint8_t idx, char* buf, size_t buf_size) {
+  std::snprintf(buf, buf_size, "snd_en_%u", static_cast<unsigned>(idx));
+}
+// SPIFFS path for raw PCM data (base path mounted at "/sounds").
+void event_pcm_path(uint8_t idx, char* buf, size_t buf_size) {
+  std::snprintf(buf, buf_size, "/sounds/snd_%u.pcm", static_cast<unsigned>(idx));
+}
+void event_filename_key(uint8_t idx, char* buf, size_t buf_size) {
+  std::snprintf(buf, buf_size, "snd_fn_%u", static_cast<unsigned>(idx));
+}
+// Core print/HMS events and Click default on; less common optional events off.
+bool default_event_enabled(uint8_t idx) { return idx < 5U || idx == 7U; }
+}  // namespace
+
+bool ConfigStore::load_audio_event_enabled(uint8_t event_index) const {
+  if (event_index >= 8) return true;
+  char key[16] = {};
+  event_enable_key(event_index, key, sizeof(key));
+  const std::string s = load_string(key);
+  if (s.empty()) {
+    return default_event_enabled(event_index);
+  }
+  return parse_bool_or_default(s, default_event_enabled(event_index));
+}
+
+esp_err_t ConfigStore::save_audio_event_enabled(uint8_t event_index, bool enabled) const {
+  if (event_index >= 8) return ESP_ERR_INVALID_ARG;
+  char key[16] = {};
+  event_enable_key(event_index, key, sizeof(key));
+  return save_string(key, enabled ? "1" : "0");
+}
+
+bool ConfigStore::has_audio_event_pcm(uint8_t event_index) const {
+  if (event_index >= 8) return false;
+  char path[32] = {};
+  event_pcm_path(event_index, path, sizeof(path));
+  struct stat st;
+  return (stat(path, &st) == 0 && st.st_size > 0);
+}
+
+std::vector<uint8_t> ConfigStore::load_audio_event_pcm(uint8_t event_index) const {
+  if (event_index >= 8) return {};
+  char path[32] = {};
+  event_pcm_path(event_index, path, sizeof(path));
+
+  FILE* f = fopen(path, "rb");
+  if (!f) return {};
+
+  fseek(f, 0, SEEK_END);
+  const long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (size <= 0) { fclose(f); return {}; }
+
+  std::vector<uint8_t> data(static_cast<size_t>(size));
+  const size_t got = fread(data.data(), 1, data.size(), f);
+  fclose(f);
+  if (got != data.size()) return {};
+  return data;
+}
+
+esp_err_t ConfigStore::save_audio_event_pcm(uint8_t event_index, const uint8_t* data,
+                                             size_t len) const {
+  if (event_index >= 8 || data == nullptr || len == 0) return ESP_ERR_INVALID_ARG;
+  char path[32] = {};
+  event_pcm_path(event_index, path, sizeof(path));
+
+  FILE* f = fopen(path, "wb");
+  if (!f) {
+    ESP_LOGE(kTag, "Cannot open %s for writing (errno %d)", path, errno);
+    return ESP_FAIL;
+  }
+  const size_t written = fwrite(data, 1, len, f);
+  fclose(f);
+  if (written != len) {
+    ESP_LOGE(kTag, "Short write to %s (%zu/%zu bytes)", path, written, len);
+    return ESP_FAIL;
+  }
+  return ESP_OK;
+}
+
+esp_err_t ConfigStore::clear_audio_event_pcm(uint8_t event_index) const {
+  if (event_index >= 8) return ESP_ERR_INVALID_ARG;
+  char path[32] = {};
+  event_pcm_path(event_index, path, sizeof(path));
+  const int ret = remove(path);
+  return (ret == 0 || errno == ENOENT) ? ESP_OK : ESP_FAIL;
+}
+
+std::string ConfigStore::load_audio_event_filename(uint8_t event_index) const {
+  if (event_index >= 8) return {};
+  char key[16] = {};
+  event_filename_key(event_index, key, sizeof(key));
+  return load_string(key);  // empty string when not stored
+}
+
+esp_err_t ConfigStore::save_audio_event_filename(uint8_t event_index,
+                                                  const std::string& name) const {
+  if (event_index >= 8) return ESP_ERR_INVALID_ARG;
+  char key[16] = {};
+  event_filename_key(event_index, key, sizeof(key));
+  return save_string(key, name);
 }
 
 }  // namespace printsphere

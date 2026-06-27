@@ -10,8 +10,8 @@ Round ESP32-S3 printer companion for Bambu Lab with a circular display, touch se
 
 ## Hardware And Stack
 
-- ESP-IDF `v5.5.x`
-- LVGL `v9.4.0`
+- ESP-IDF `v5.5.4`
+- LVGL `v9.5.0`
 - Waveshare ESP32-S3 AMOLED 1.75
 - AXP2101 PMU integration via `XPowersLib`
 - no Home Assistant required
@@ -19,7 +19,7 @@ Round ESP32-S3 printer companion for Bambu Lab with a circular display, touch se
 ## Current Codebase Features
 
 - official Waveshare BSP for display, touch, and LVGL
-- NVS-based configuration storage
+- NVS-based configuration storage plus LittleFS sound storage
 - `AP+STA` Wi-Fi manager
 - local setup portal on `esp_http_server`
 - Web Config that stays open during initial provisioning and switches to PIN/session unlock on the home network afterwards
@@ -36,14 +36,18 @@ Round ESP32-S3 printer companion for Bambu Lab with a circular display, touch se
 - chamber light toggle path on supported models
 - battery and USB status with power-aware behavior
 - embedded on-device error text lookup database without a separate storage partition
+- configurable sound notifications with per-event WAV upload
 - V2 protocol support for P2S and H2 series (`snow`-based spool detection, `vir_slot` filament info)
-- AMS page with individual tray pills and EXT spool indicator
+- multi-AMS pages with individual tray pills and EXT spool indicator
 - OTA firmware update support
 
 ## Flashing
 
 for the first use please use the Webflasher: https://cptkirki.github.io/PrintSphere/flash/
 For OTA updates, use [`release/ota/printsphere_ota.bin`](release/ota/printsphere_ota.bin).
+
+PrintSphere v1.6 changes the partition layout for expanded NVS and LittleFS sound storage.
+Devices on v1.5.x or older need one full USB/WebSerial flash before OTA updates are used again.
 
 ### manual flashing:
 

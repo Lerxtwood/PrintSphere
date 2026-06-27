@@ -127,192 +127,103 @@ const char* to_string(FieldSource source) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Per-model capability table.
+//
+// Adding a new printer model is a two-step change:
+//   1. Add an entry to PrinterModel in printer_state.hpp.
+//   2. Add a row here, in the same order as the enum.
+// kModelCapabilities is indexed by static_cast<size_t>(PrinterModel) — the
+// row order MUST match the enum declaration. caps_for() guards against
+// out-of-range values by falling back to the kUnknown row.
+//
+// All flags are stored once, so a new capability bit needs to be set
+// exactly once per model — not in nine parallel switch statements.
+// -----------------------------------------------------------------------------
+
+namespace {
+
+struct ModelCapabilityFlags {
+  bool jpeg_camera;
+  bool rtsp_camera;
+  bool chamber_temperature;
+  bool secondary_nozzle_temperature;
+  bool chamber_light;
+  bool secondary_chamber_light;
+  bool supports_local_status;
+  bool requires_developer_mode_for_local_status;
+  bool prefers_cloud_status;
+};
+
+// Indexed by static_cast<size_t>(PrinterModel). Order MUST match the enum
+// PrinterModel in printer_state.hpp.
+constexpr ModelCapabilityFlags kModelCapabilities[] = {
+    // jpeg   rtsp   chmbT  sNzlT  chmbL  sChmbL local  devLoc cloud
+    /* kUnknown */ {false, false, false, false, false, false, true,  false, false},
+    /* kA1      */ {true,  false, false, false, false, false, true,  false, false},
+    /* kA1Mini  */ {true,  false, false, false, false, false, true,  false, false},
+    /* kP1P     */ {true,  false, false, false, false, false, true,  false, false},
+    /* kP1S     */ {true,  false, false, false, true,  false, true,  false, false},
+    /* kP2S     */ {false, true,  true,  false, true,  false, true,  false, true },
+    /* kH2C     */ {false, true,  true,  false, true,  true,  true,  true,  true },
+    /* kH2D     */ {false, true,  true,  true,  true,  true,  true,  true,  true },
+    /* kH2DPro  */ {false, true,  true,  true,  true,  true,  true,  true,  true },
+    /* kH2S     */ {false, true,  true,  false, true,  true,  true,  true,  true },
+    /* kX1      */ {false, true,  true,  false, true,  false, true,  false, true },
+    /* kX1C     */ {false, true,  true,  false, true,  false, true,  false, true },
+    /* kX1E     */ {false, true,  true,  false, true,  false, true,  false, true },
+};
+
+constexpr size_t kModelCapabilityCount =
+    sizeof(kModelCapabilities) / sizeof(kModelCapabilities[0]);
+
+// Compile-time guard: the table must have one row per enum value.
+// Update this constant if the PrinterModel enum gains/loses members.
+static_assert(kModelCapabilityCount == 13,
+              "kModelCapabilities row count must match PrinterModel enum size");
+
+constexpr const ModelCapabilityFlags& caps_for(PrinterModel model) {
+  const auto idx = static_cast<size_t>(model);
+  return idx < kModelCapabilityCount ? kModelCapabilities[idx]
+                                     : kModelCapabilities[0];  // kUnknown row
+}
+
+}  // namespace
+
 bool printer_model_has_jpeg_camera(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    case PrinterModel::kP1S:
-      return true;
-    case PrinterModel::kUnknown:
-    case PrinterModel::kP2S:
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-    case PrinterModel::kH2S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-    default:
-      return false;
-  }
+  return caps_for(model).jpeg_camera;
 }
 
 bool printer_model_has_rtsp_camera(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kP2S:
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-    case PrinterModel::kH2S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-      return true;
-    case PrinterModel::kUnknown:
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    case PrinterModel::kP1S:
-    default:
-      return false;
-  }
+  return caps_for(model).rtsp_camera;
 }
 
 bool printer_model_has_chamber_temperature(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kP2S:
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-    case PrinterModel::kH2S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-      return true;
-    case PrinterModel::kUnknown:
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    case PrinterModel::kP1S:
-    default:
-      return false;
-  }
+  return caps_for(model).chamber_temperature;
 }
 
 bool printer_model_has_secondary_nozzle_temperature(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-      return true;
-    case PrinterModel::kUnknown:
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    case PrinterModel::kP1S:
-    case PrinterModel::kP2S:
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-    default:
-      return false;
-  }
+  return caps_for(model).secondary_nozzle_temperature;
 }
 
 bool printer_model_has_chamber_light(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kP1S:
-    case PrinterModel::kP2S:
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-    case PrinterModel::kH2S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-      return true;
-    case PrinterModel::kUnknown:
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    default:
-      return false;
-  }
+  return caps_for(model).chamber_light;
 }
 
 bool printer_model_has_secondary_chamber_light(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-    case PrinterModel::kH2S:
-      return true;
-    case PrinterModel::kUnknown:
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    case PrinterModel::kP1S:
-    case PrinterModel::kP2S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-    default:
-      return false;
-  }
+  return caps_for(model).secondary_chamber_light;
 }
 
 bool printer_model_supports_local_status(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kP2S:
-    case PrinterModel::kUnknown:
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    case PrinterModel::kP1S:
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-    case PrinterModel::kH2S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-    default:
-      return true;
-  }
+  return caps_for(model).supports_local_status;
 }
 
 bool printer_model_requires_developer_mode_for_local_status(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-    case PrinterModel::kH2S:
-      return true;
-    case PrinterModel::kUnknown:
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    case PrinterModel::kP1S:
-    case PrinterModel::kP2S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-    default:
-      return false;
-  }
+  return caps_for(model).requires_developer_mode_for_local_status;
 }
 
 bool printer_model_prefers_cloud_status(PrinterModel model) {
-  switch (model) {
-    case PrinterModel::kP2S:
-    case PrinterModel::kH2C:
-    case PrinterModel::kH2D:
-    case PrinterModel::kH2DPro:
-    case PrinterModel::kH2S:
-      return true;
-    case PrinterModel::kUnknown:
-    case PrinterModel::kA1:
-    case PrinterModel::kA1Mini:
-    case PrinterModel::kP1P:
-    case PrinterModel::kP1S:
-    case PrinterModel::kX1:
-    case PrinterModel::kX1C:
-    case PrinterModel::kX1E:
-    default:
-      return false;
-  }
+  return caps_for(model).prefers_cloud_status;
 }
 
 bool printer_serial_family_has_no_chamber_temperature(const std::string& serial) {

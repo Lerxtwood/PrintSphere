@@ -78,7 +78,7 @@ size_t allocated_size(const void* ptr) {
 }
 
 void log_heap_diag(const char* context) {
-  ESP_LOGI(kTag,
+  ESP_LOGV(kTag,
            "[RAM] %s: int_free=%u int_largest=%u dma_free=%u dma_largest=%u "
            "psram_free=%u psram_largest=%u",
            context != nullptr ? context : "-",
@@ -91,7 +91,7 @@ void log_heap_diag(const char* context) {
 }
 
 void log_ptr_diag(const char* context, const void* ptr, size_t bytes) {
-  ESP_LOGI(kTag,
+  ESP_LOGV(kTag,
            "[RAM] %s: ptr=%p bytes=%u alloc=%u ram=%s",
            context != nullptr ? context : "-", ptr,
            static_cast<unsigned>(bytes),
@@ -102,7 +102,7 @@ void log_ptr_diag(const char* context, const void* ptr, size_t bytes) {
 
 void log_blob_diag(const char* context, const std::shared_ptr<std::vector<uint8_t>>& blob) {
   const void* data = blob && !blob->empty() ? blob->data() : nullptr;
-  ESP_LOGI(kTag,
+  ESP_LOGV(kTag,
            "[RAM] %s: size=%u capacity=%u alloc=%u ram=%s data=%p",
            context != nullptr ? context : "-",
            static_cast<unsigned>(blob ? blob->size() : 0U),

@@ -41,7 +41,6 @@ class Application {
   bool hybrid_local_gate_open_ = false;
   TickType_t hybrid_camera_cooldown_deadline_ = 0;
   std::atomic<TickType_t> local_mqtt_handoff_until_tick_{0};
-  std::atomic<bool> hybrid_cloud_printer_online_{false};
   bool filament_wake_enabled_ = false;
   bool filament_anim_enabled_ = true;
   bool chamber_light_override_active_ = false;
