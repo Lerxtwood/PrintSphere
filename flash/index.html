@@ -438,7 +438,7 @@
           version: "v1.6",
           path: "../release/initial/printsphere_full.bin",
           displayPath: "release/initial/printsphere_full.bin",
-          note: "Recommended for normal setup. Devices on v1.5.x or older need this full flash once before OTA updates are used again.",
+          note: "Factory flash erases device data before installing v1.6. Devices on v1.5.x or older need this once before OTA updates are used again.",
         },
       ];
 
@@ -470,7 +470,7 @@
         return {
           name: "PrintSphere",
           version: firmware.version,
-          new_install_prompt_erase: true,
+          new_install_prompt_erase: false,
           new_install_improv_wait_time: 0,
           builds: [
             {
