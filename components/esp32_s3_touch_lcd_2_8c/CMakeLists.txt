@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "esp32_s3_touch_lcd_2_8c.c"
+        "esp_lcd_touch_gt911.c"
+    INCLUDE_DIRS
+        "include"
+        "include/bsp"
+    REQUIRES
+        driver
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_ledc
+        esp_driver_spi
+        esp_io_expander_tca9554
+        esp_lcd
+        esp_lcd_touch
+        esp_lvgl_adapter
+        esp_codec_dev
+)

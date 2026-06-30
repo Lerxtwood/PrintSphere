@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(PRINTSPHERE_RELEASE_VERSION "v1.6")
 set(PROJECT_VER "${PRINTSPHERE_RELEASE_VERSION}")
+set(EXCLUDE_COMPONENTS esp32_s3_touch_amoled_1_75)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(printsphere_idf)
 

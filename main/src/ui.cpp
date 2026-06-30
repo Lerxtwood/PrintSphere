@@ -11,7 +11,7 @@
 
 #include "sdkconfig.h"
 #include "misc/cache/instance/lv_image_cache.h"
-#include "bsp/esp32_s3_touch_amoled_1_75.h"
+#include "bsp/esp32_s3_touch_lcd_2_8c.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -266,8 +266,8 @@ void apply_touch_rotation_flags(DisplayRotation rotation, bsp_display_cfg_t* cfg
       break;
     case DisplayRotation::k180:
       cfg->touch_flags.swap_xy = 0;
-      cfg->touch_flags.mirror_x = 0;
-      cfg->touch_flags.mirror_y = 0;
+      cfg->touch_flags.mirror_x = 1;
+      cfg->touch_flags.mirror_y = 1;
       break;
     case DisplayRotation::k270:
       cfg->touch_flags.swap_xy = 1;
@@ -277,8 +277,8 @@ void apply_touch_rotation_flags(DisplayRotation rotation, bsp_display_cfg_t* cfg
     case DisplayRotation::k0:
     default:
       cfg->touch_flags.swap_xy = 0;
-      cfg->touch_flags.mirror_x = 1;
-      cfg->touch_flags.mirror_y = 1;
+      cfg->touch_flags.mirror_x = 0;
+      cfg->touch_flags.mirror_y = 0;
       break;
   }
 }
@@ -1234,13 +1234,10 @@ esp_err_t Ui::initialize() {
         };
       }(),
       .rotation = ESP_LV_ADAPTER_ROTATE_0,
-      // TE_SYNC is safe again with esp_lvgl_adapter 0.5.3 plus our bounded
-      // TX-done wait patch. Upstream bounds the TE wait and clears stale
-      // SPI TX-done notifications before draw. Without TE on this panel, a
-      // single PSRAM buffer tears badly and the
-      // unbounded LVGL flush rate steals CPU/PSRAM-bus from mbedTLS, which
-      // causes printer-MQTT TLS handshakes to time out (select() timeout).
-      .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC,
+      // The 2.8C board is an RGB panel without a TE signal. Use double full
+      // buffering so the RGB driver can switch complete framebuffers instead of
+      // showing LVGL's in-progress updates on screen.
+      .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL,
       .touch_flags = {
           .swap_xy = 0,
           .mirror_x = 1,
