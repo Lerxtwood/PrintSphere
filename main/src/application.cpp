@@ -12,10 +12,17 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "bsp/esp32_s3_touch_lcd_2_8c.h"
 #include "printsphere/error_lookup.hpp"
 #include "printsphere/status_resolver.hpp"
 #include "printsphere/time_sync.hpp"
+
+#if defined(PRINTSPHERE_HW_VARIANT_AMOLED_1_75)
+#include "bsp/esp32_s3_touch_amoled_1_75.h"
+#elif defined(PRINTSPHERE_HW_VARIANT_LCD_2_8C)
+#include "bsp/esp32_s3_touch_lcd_2_8c.h"
+#else
+#error "Unknown PrintSphere hardware variant"
+#endif
 
 namespace printsphere {
 

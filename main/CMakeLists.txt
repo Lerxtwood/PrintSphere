@@ -1,3 +1,38 @@
+set(PRINTSPHERE_MAIN_REQUIRES
+    app_update
+    esp_pm
+    esp_https_ota
+    esp_driver_gpio
+    esp_event
+    esp_http_client
+    esp_http_server
+    mqtt
+    esp_netif
+    lwip
+    espressif__esp_new_jpeg
+    espressif__esp_codec_dev
+    esp-tls
+    esp_wifi
+    libpng
+    lvgl
+    nvs_flash
+    joltwallet__littlefs
+)
+
+set(PRINTSPHERE_MAIN_PRIV_REQUIRES)
+
+if("${PRINTSPHERE_HW_COMPILE_DEFINE}" STREQUAL "PRINTSPHERE_HW_VARIANT_AMOLED_1_75=1")
+    list(APPEND PRINTSPHERE_MAIN_PRIV_REQUIRES
+        XPowersLib
+        esp32_s3_touch_amoled_1_75
+    )
+elseif("${PRINTSPHERE_HW_COMPILE_DEFINE}" STREQUAL "PRINTSPHERE_HW_VARIANT_LCD_2_8C=1")
+    list(APPEND PRINTSPHERE_MAIN_PRIV_REQUIRES
+        esp_adc
+        esp32_s3_touch_lcd_2_8c
+    )
+endif()
+
 idf_component_register(
     SRCS
         "app_main.cpp"
@@ -32,29 +67,44 @@ idf_component_register(
         "include/certs/bambu_x2c_260425.cert"
         "include/error_lookup/error_lookup.tsv"
     REQUIRES
-        XPowersLib
-        app_update
-        esp_https_ota
-        esp32_s3_touch_lcd_2_8c
-        esp_driver_gpio
-        esp_event
-        esp_http_client
-        esp_http_server
-        mqtt
-        esp_netif
-        lwip
-        espressif__esp_new_jpeg
-        esp-tls
-        esp_wifi
-        libpng
-        lvgl
-        nvs_flash
-        joltwallet__littlefs
+        ${PRINTSPHERE_MAIN_REQUIRES}
+    PRIV_REQUIRES
+        ${PRINTSPHERE_MAIN_PRIV_REQUIRES}
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     PRINTSPHERE_RELEASE_VERSION="${PRINTSPHERE_RELEASE_VERSION}"
+    ${PRINTSPHERE_HW_COMPILE_DEFINE}
 )
+
+if("${PRINTSPHERE_HW_COMPILE_DEFINE}" STREQUAL "PRINTSPHERE_HW_VARIANT_AMOLED_1_75=1")
+    idf_component_get_property(PRINTSPHERE_BSP_DIR esp32_s3_touch_amoled_1_75 COMPONENT_DIR)
+    idf_component_get_property(PRINTSPHERE_BSP_LIB esp32_s3_touch_amoled_1_75 COMPONENT_LIB)
+    idf_component_get_property(PRINTSPHERE_XPOWERS_DIR XPowersLib COMPONENT_DIR)
+    idf_component_get_property(PRINTSPHERE_XPOWERS_LIB XPowersLib COMPONENT_LIB)
+    target_include_directories(${COMPONENT_LIB} PRIVATE
+        "${PRINTSPHERE_BSP_DIR}/include"
+        "${PRINTSPHERE_XPOWERS_DIR}/src"
+    )
+    target_link_libraries(${COMPONENT_LIB} PRIVATE
+        ${PRINTSPHERE_BSP_LIB}
+        ${PRINTSPHERE_XPOWERS_LIB}
+    )
+elseif("${PRINTSPHERE_HW_COMPILE_DEFINE}" STREQUAL "PRINTSPHERE_HW_VARIANT_LCD_2_8C=1")
+    idf_component_get_property(PRINTSPHERE_BSP_DIR esp32_s3_touch_lcd_2_8c COMPONENT_DIR)
+    idf_component_get_property(PRINTSPHERE_BSP_LIB esp32_s3_touch_lcd_2_8c COMPONENT_LIB)
+    idf_component_get_property(PRINTSPHERE_ADC_DIR esp_adc COMPONENT_DIR)
+    idf_component_get_property(PRINTSPHERE_ADC_LIB esp_adc COMPONENT_LIB)
+    target_include_directories(${COMPONENT_LIB} PRIVATE
+        "${PRINTSPHERE_BSP_DIR}/include"
+        "${PRINTSPHERE_ADC_DIR}/include"
+    )
+    target_link_libraries(${COMPONENT_LIB} PRIVATE
+        ${PRINTSPHERE_BSP_LIB}
+        ${PRINTSPHERE_ADC_LIB}
+    )
+endif()
+
 string(FIND "${PRINTSPHERE_RELEASE_VERSION}" "-debug" _debug_pos)
 string(FIND "${PRINTSPHERE_RELEASE_VERSION}" "_debug" _debug_pos2)
 if(_debug_pos GREATER -1 OR _debug_pos2 GREATER -1)
