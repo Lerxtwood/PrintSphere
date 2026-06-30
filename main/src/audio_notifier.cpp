@@ -6,7 +6,7 @@
 #include <mutex>
 #include <vector>
 
-#include "bsp/esp32_s3_touch_amoled_1_75.h"
+#include "bsp/esp32_s3_touch_lcd_2_8c.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_log.h"

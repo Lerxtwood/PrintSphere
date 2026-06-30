@@ -433,12 +433,20 @@
     <script>
       const firmwares = [
         {
-          label: "Stable v1.6",
+          label: "Stable v1.6 (1.75 AMOLED)",
           channel: "Stable",
           version: "v1.6",
           path: "../release/initial/printsphere_full.bin",
           displayPath: "release/initial/printsphere_full.bin",
           note: "Factory flash erases device data before installing v1.6. Devices on v1.5.x or older need this once before OTA updates are used again.",
+        },
+        {
+          label: 'Stable v1.6 (2.8" LCD)',
+          channel: "Stable",
+          version: "v1.6-2.8C",
+          path: "../release/2.8c/initial/printsphere_full.bin",
+          displayPath: "release/2.8c/initial/printsphere_full.bin",
+          note: 'Factory flash image for the ESP32-S3-Touch-LCD-2.8C hardware variant. This installs the dedicated 2.8" board port and erases device data before flashing.',
         },
       ];
 

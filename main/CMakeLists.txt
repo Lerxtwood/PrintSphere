@@ -35,7 +35,7 @@ idf_component_register(
         XPowersLib
         app_update
         esp_https_ota
-        esp32_s3_touch_amoled_1_75
+        esp32_s3_touch_lcd_2_8c
         esp_driver_gpio
         esp_event
         esp_http_client

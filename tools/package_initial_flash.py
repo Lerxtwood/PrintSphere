@@ -13,6 +13,11 @@ def parse_args() -> argparse.Namespace:
         description="Merge ESP-IDF flash artifacts into one initial-flash firmware.bin."
     )
     parser.add_argument(
+        "--release-root",
+        default="release",
+        help="Release root directory. Example: release or release/2.8c",
+    )
+    parser.add_argument(
         "--build-dir",
         default="build",
         help="ESP-IDF build directory containing flasher_args.json",
@@ -109,6 +114,7 @@ def main() -> int:
     args = parse_args()
     build_dir = Path(args.build_dir).resolve()
     release_version = args.version.strip()
+    release_root = Path(args.release_root)
 
     # Safety check: a version containing "_debug" must use --debug so debug
     # builds never land in the stable release/initial/ or release/ota/ folders.
@@ -126,11 +132,24 @@ def main() -> int:
 
     # Resolve output paths: --debug and --beta both go to release/beta/
     if args.debug or args.beta:
-        output_path = Path("release/beta/printsphere_full.bin").resolve()
-        ota_output_path = Path("release/beta/printsphere_ota.bin").resolve()
+        output_path = (release_root / "beta" / "printsphere_full.bin").resolve()
+        ota_output_path = (release_root / "beta" / "printsphere_ota.bin").resolve()
     else:
-        output_path = Path(args.output).resolve()
-        ota_output_path = Path(args.ota_output).resolve()
+        default_output = Path("release/initial/printsphere_full.bin")
+        default_ota_output = Path("release/ota/printsphere_ota.bin")
+
+        output_arg = Path(args.output)
+        ota_output_arg = Path(args.ota_output)
+
+        if output_arg == default_output:
+            output_path = (release_root / "initial" / "printsphere_full.bin").resolve()
+        else:
+            output_path = output_arg.resolve()
+
+        if ota_output_arg == default_ota_output:
+            ota_output_path = (release_root / "ota" / "printsphere_ota.bin").resolve()
+        else:
+            ota_output_path = ota_output_arg.resolve()
 
     entries = load_flash_entries(build_dir)
     merged = merge_flash_entries(entries)
