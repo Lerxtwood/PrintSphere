@@ -661,7 +661,6 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void)
 #define LVGL_TICK_PERIOD_MS (CONFIG_BSP_DISPLAY_LVGL_TICK)
 #define LVGL_MAX_SLEEP_MS (CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP)
 #define BSP_LCD_QSPI_PCLK_HZ (80 * 1000 * 1000)
-#define LVGL_BUFFER_HEIGHT_PSRAM (12)
 #define LVGL_BUFFER_HEIGHT_INTERNAL (12)
 
 esp_err_t bsp_display_brightness_init(void)
@@ -859,9 +858,13 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
     }
 
     const bool use_te_sync = (tear_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC);
-    const bool use_psram = psram_available;
+    // The raw CO5300/QSPI path works reliably, but the LVGL adapter's PSRAM
+    // draw-buffer path can leave this panel stuck white before the first UI
+    // frame appears. Use small internal LVGL buffers and let the panel wrapper
+    // stage any external source buffers through DMA-capable internal memory.
+    const bool use_psram = false;
 
-    const uint32_t buffer_height = use_psram ? LVGL_BUFFER_HEIGHT_PSRAM : LVGL_BUFFER_HEIGHT_INTERNAL;
+    const uint32_t buffer_height = LVGL_BUFFER_HEIGHT_INTERNAL;
     const size_t max_transfer_sz = BSP_LCD_H_RES * buffer_height * BSP_LCD_BITS_PER_PIXEL / 8;
     const bsp_display_config_t disp_config = {
         .max_transfer_sz = max_transfer_sz,

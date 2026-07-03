@@ -77,6 +77,7 @@ class Ui {
     return print_command_request_.load() != static_cast<uint8_t>(PrintCommand::kNone);
   }
   bool consume_portal_unlock_request();
+  bool consume_return_to_radar_request();
 
   struct PrinterCardInfo {
     uint8_t index = 0;
@@ -137,6 +138,7 @@ class Ui {
   static void pager_event_cb(lv_event_t* event);
   static void screen_event_cb(lv_event_t* event);
   static void logo_event_cb(lv_event_t* event);
+  static void radar_button_event_cb(lv_event_t* event);
   static void pause_button_event_cb(lv_event_t* event);
   static void stop_button_event_cb(lv_event_t* event);
   void handle_pause_button_event(lv_event_t* event);
@@ -214,6 +216,8 @@ class Ui {
   lv_obj_t* progress_label_ = nullptr;
   lv_obj_t* battery_icon_label_ = nullptr;
   lv_obj_t* battery_pct_label_ = nullptr;
+  lv_obj_t* radar_button_ = nullptr;
+  lv_obj_t* radar_button_label_ = nullptr;
   lv_obj_t* badge_slot_ = nullptr;
   lv_obj_t* logo_badge_ = nullptr;
   lv_obj_t* logo_image_ = nullptr;
@@ -328,6 +332,7 @@ class Ui {
   mutable std::mutex camera_refresh_mutex_{};
   bool camera_refresh_requested_ = false;
   std::atomic<bool> chamber_light_toggle_requested_{false};
+  std::atomic<bool> return_to_radar_requested_{false};
   std::atomic<uint8_t> print_command_request_{static_cast<uint8_t>(PrintCommand::kNone)};
   std::atomic<bool> portal_unlock_requested_{false};
   PrinterSnapshot deferred_snapshot_{};

@@ -1358,6 +1358,10 @@ bool Ui::consume_portal_unlock_request() {
   return portal_unlock_requested_.exchange(false);
 }
 
+bool Ui::consume_return_to_radar_request() {
+  return return_to_radar_requested_.exchange(false);
+}
+
 void Ui::set_portal_access_state(bool lock_enabled, bool request_authorized,
                                  bool session_active, bool pin_active,
                                  const std::string& pin_code, uint32_t pin_remaining_s,
@@ -2881,6 +2885,27 @@ esp_err_t Ui::build_dashboard() {
   apply_display_rotation_visual_offset(battery_pct_label_, display_rotation_);
   lv_obj_move_foreground(battery_pct_label_);
 
+  radar_button_ = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(radar_button_, 86, 32);
+  lv_obj_set_style_radius(radar_button_, 16, 0);
+  lv_obj_set_style_bg_color(radar_button_, lv_color_hex(0x10251A), 0);
+  lv_obj_set_style_bg_opa(radar_button_, LV_OPA_80, 0);
+  lv_obj_set_style_border_color(radar_button_, lv_color_hex(0x32E58F), 0);
+  lv_obj_set_style_border_opa(radar_button_, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(radar_button_, 1, 0);
+  lv_obj_set_style_shadow_width(radar_button_, 0, 0);
+  lv_obj_set_style_pad_all(radar_button_, 0, 0);
+  lv_obj_clear_flag(radar_button_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_align(radar_button_, LV_ALIGN_TOP_MID, 0, 8);
+  apply_display_rotation_visual_offset(radar_button_, display_rotation_);
+  lv_obj_add_event_cb(radar_button_, &Ui::radar_button_event_cb, LV_EVENT_ALL, this);
+  radar_button_label_ = lv_label_create(radar_button_);
+  set_label_text_if_changed(radar_button_label_, "Radar");
+  lv_obj_set_style_text_font(radar_button_label_, dosis20, 0);
+  lv_obj_set_style_text_color(radar_button_label_, lv_color_hex(0xA8FFD2), 0);
+  lv_obj_center(radar_button_label_);
+  lv_obj_move_foreground(radar_button_);
+
   badge_slot_ = lv_obj_create(page1_);
   make_transparent(badge_slot_);
   lv_obj_set_size(badge_slot_, 86, 86);
@@ -3585,6 +3610,21 @@ void Ui::handle_screen_event(lv_event_t* event) {
       return;
     }
 
+    // Combined-firmware escape hatch: let a top-center pull-down win before
+    // the normal vertical brightness gesture claims the drag.
+    if (gesture_start_x_ > 188 && gesture_start_x_ < 278 && gesture_start_y_ < 42 &&
+        dy <= -85 && abs_dx < 70) {
+      gesture_active_ = false;
+      swipe_switched_ = false;
+      set_pager_scroll_locked(false);
+      if (overlay_visible_) {
+        lv_obj_add_flag(brightness_overlay_, LV_OBJ_FLAG_HIDDEN);
+        overlay_visible_ = false;
+      }
+      return_to_radar_requested_.store(true);
+      return;
+    }
+
     if (!overlay_visible_) {
       // Resolve the gesture once: either a horizontal page swipe or a mostly
       // vertical brightness drag. This avoids accidental brightness changes
@@ -3647,6 +3687,14 @@ void Ui::handle_screen_event(lv_event_t* event) {
       return;
     }
     if (swipe_locked) {
+      return;
+    }
+
+    // Combined-firmware escape hatch: pull down from the very top-center lip to reboot
+    // into the other OTA slot, which is Capsule Radar in the combined setup.
+    if (gesture_start_x_ > 188 && gesture_start_x_ < 278 && gesture_start_y_ < 42 &&
+        dy <= -85 && abs_dx < 70) {
+      return_to_radar_requested_.store(true);
       return;
     }
 
@@ -3918,6 +3966,27 @@ void Ui::logo_event_cb(lv_event_t* event) {
   }
 }
 
+void Ui::radar_button_event_cb(lv_event_t* event) {
+  auto* ui = static_cast<Ui*>(lv_event_get_user_data(event));
+  if (ui != nullptr) {
+    const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_CLICKED) {
+      if (ui->radar_button_ != nullptr) {
+        lv_obj_set_style_bg_color(ui->radar_button_, lv_color_hex(0x32E58F), 0);
+        lv_obj_set_style_border_color(ui->radar_button_, lv_color_hex(0xFFFFFF), 0);
+      }
+      if (ui->radar_button_label_ != nullptr) {
+        set_label_text_if_changed(ui->radar_button_label_, code == LV_EVENT_CLICKED ? "..." : "Radar");
+        lv_obj_set_style_text_color(ui->radar_button_label_, lv_color_hex(0x06100A), 0);
+      }
+    }
+    if (code == LV_EVENT_CLICKED) {
+      ui->return_to_radar_requested_.store(true);
+    }
+  }
+  lv_event_stop_bubbling(event);
+}
+
 void Ui::pause_button_event_cb(lv_event_t* event) {
   auto* ui = static_cast<Ui*>(lv_event_get_user_data(event));
   if (ui != nullptr) {
@@ -3951,3 +4020,4 @@ void Ui::handle_remaining_row_click() {
 }
 
 }  // namespace printsphere
+

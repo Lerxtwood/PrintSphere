@@ -40,6 +40,7 @@ constexpr uint64_t kPortalSessionLifetimeMs = 10ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalSessionExtendMs = 5ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalProvisioningGraceMs = 5ULL * 60ULL * 1000ULL;
 constexpr char kPortalReleaseVersion[] = PRINTSPHERE_RELEASE_VERSION;
+constexpr char kCompanionPrintSphereOtaUrl[] = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/PrintSphere-ota.bin";
 constexpr char kFaviconSvg[] =
     "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\">"
     "<rect width=\"64\" height=\"64\" rx=\"16\" fill=\"#121a23\"/>"
@@ -1039,6 +1040,14 @@ esp_err_t SetupPortal::start() {
   health_uri.user_ctx = this;
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &health_uri), kTag,
                       "health handler failed");
+
+  httpd_uri_t return_to_radar_uri = {};
+  return_to_radar_uri.uri = "/api/return-to-radar";
+  return_to_radar_uri.method = HTTP_POST;
+  return_to_radar_uri.handler = &SetupPortal::handle_return_to_radar;
+  return_to_radar_uri.user_ctx = this;
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &return_to_radar_uri), kTag,
+                      "return-to-radar handler failed");
 
   httpd_uri_t unlock_uri = {};
   unlock_uri.uri = "/api/unlock";
@@ -2339,11 +2348,11 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
     html += "<div class=\"micro\" id=\"ota-status\">Select a .bin file built for PrintSphere (ESP32-S3).</div></div>";
     html += "<hr style=\"border:none;border-top:1px solid var(--line);margin:16px 0 4px\">";
     html += "<div class=\"field\"><label for=\"ota_url\">Or flash from URL</label>";
-    html += "<input type=\"url\" id=\"ota_url\" placeholder=\"https://github.com/cptkirki/PrintSphere/blob/main/release/ota/printsphere_ota.bin\" autocomplete=\"off\" spellcheck=\"false\"></div>";
-    html += "<p class=\"micro\">GitHub blob links (github.com/&hellip;/blob/&hellip;) are converted to raw download URLs automatically.</p>";
+    html += "<input type=\"url\" id=\"ota_url\" value=\"" + std::string(kCompanionPrintSphereOtaUrl) + "\" placeholder=\"" + std::string(kCompanionPrintSphereOtaUrl) + "\" autocomplete=\"off\" spellcheck=\"false\"></div>";
+    html += "<p class=\"micro\">Defaults to the companion PrintSphere firmware from the Lerxtwood/capsule-radar GitHub Release. GitHub blob links are still converted automatically.</p>";
     html += "<div id=\"ota-url-progress-wrap\" style=\"display:none;margin:4px 0;height:8px;border-radius:6px;background:#0e1620;overflow:hidden\">";
     html += "<div id=\"ota-url-progress-bar\" style=\"height:100%;width:0%;background:var(--accent);transition:width .3s;\"></div></div>";
-    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"ota-url-button\">Flash from URL</button>";
+    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"ota-url-latest-button\">Use companion latest</button><button type=\"button\" class=\"secondary\" id=\"ota-url-button\">Flash from URL</button>";
     html += "<div class=\"micro\" id=\"ota-url-status\">Enter a direct .bin URL or a GitHub blob link above.</div></div>";
     end_collapsible_section();
   }
@@ -3100,7 +3109,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += "xhr.setRequestHeader('Content-Type','application/octet-stream');";
   html += "xhr.send(file);});";
   html += "var otaUrlInput=document.getElementById('ota_url');";
-  html += "var otaUrlBtn=document.getElementById('ota-url-button');";
+  html += "var otaUrlBtn=document.getElementById('ota-url-button');var otaUrlLatestBtn=document.getElementById('ota-url-latest-button');var COMPANION_PRINTSPHERE_OTA_URL='https://github.com/Lerxtwood/capsule-radar/releases/latest/download/PrintSphere-ota.bin';";
   html += "var otaUrlStatus=document.getElementById('ota-url-status');";
   html += "var otaUrlWrap=document.getElementById('ota-url-progress-wrap');";
   html += "var otaUrlBar=document.getElementById('ota-url-progress-bar');";
@@ -3131,7 +3140,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "}})"
           ".catch(function(){otaUrlPoll=setTimeout(poll,1500);});"
           "};otaUrlPoll=setTimeout(poll,600);}";
-  html += "if(otaUrlBtn){"
+  html += "if(otaUrlLatestBtn){otaUrlLatestBtn.addEventListener('click',function(){if(otaUrlInput)otaUrlInput.value=COMPANION_PRINTSPHERE_OTA_URL;if(otaUrlStatus)otaUrlStatus.textContent='Ready to flash companion PrintSphere firmware from GitHub Release.';});}if(otaUrlBtn){"
           "otaUrlBtn.addEventListener('click',function(){"
           "if(otaUrlPoll){clearTimeout(otaUrlPoll);otaUrlPoll=null;}"
           "var raw=otaUrlInput?githubToRaw(otaUrlInput.value.trim()):'';"
@@ -3238,6 +3247,30 @@ esp_err_t SetupPortal::handle_health(httpd_req_t* request) {
   body += "}";
 
   send_json(request, body);
+  return ESP_OK;
+}
+
+esp_err_t SetupPortal::handle_return_to_radar(httpd_req_t* request) {
+  const esp_partition_t* radar =
+      esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
+  if (radar == nullptr) {
+    send_json(request, "{\"error\":\"Radar OTA slot not found\",\"target\":\"ota_0\"}");
+    return ESP_FAIL;
+  }
+
+  const esp_err_t err = esp_ota_set_boot_partition(radar);
+  if (err != ESP_OK) {
+    std::string body = "{\"error\":\"Boot partition switch failed\",\"detail\":\"";
+    body += esp_err_to_name(err);
+    body += "\"}";
+    send_json(request, body);
+    return ESP_FAIL;
+  }
+
+  ESP_LOGW(kTag, "Returning to Capsule Radar via %s at 0x%lx", radar->label,
+           static_cast<unsigned long>(radar->address));
+  send_json(request, "{\"status\":\"rebooting\",\"target\":\"Capsule Radar\",\"slot\":\"ota_0\"}");
+  xTaskCreate(&SetupPortal::reboot_task, "return_radar", 2048, nullptr, 3, nullptr);
   return ESP_OK;
 }
 

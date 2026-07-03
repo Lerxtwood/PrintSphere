@@ -7,7 +7,9 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_pm.h"
+#include "esp_system.h"
 #include "esp_littlefs.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -245,6 +247,43 @@ void wait_for_next_iteration(Ui& ui, TickType_t delay) {
     }
   }
 }
+
+void reboot_to_other_ota_slot() {
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  if (running == nullptr) {
+    ESP_LOGE(kTag, "Cannot switch firmware: running partition unknown");
+    return;
+  }
+
+  esp_partition_subtype_t target_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0;
+  if (running->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0) {
+    target_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
+  } else if (running->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1) {
+    target_subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0;
+  } else {
+    ESP_LOGE(kTag, "Cannot switch firmware from non-OTA partition '%s' subtype=0x%02x",
+             running->label, running->subtype);
+    return;
+  }
+
+  const esp_partition_t* target =
+      esp_partition_find_first(ESP_PARTITION_TYPE_APP, target_subtype, nullptr);
+  if (target == nullptr) {
+    ESP_LOGE(kTag, "Cannot switch firmware: target OTA subtype 0x%02x not found",
+             target_subtype);
+    return;
+  }
+
+  ESP_LOGW(kTag, "Switching firmware: %s -> %s", running->label, target->label);
+  const esp_err_t err = esp_ota_set_boot_partition(target);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_ota_set_boot_partition(%s) failed: %s", target->label,
+             esp_err_to_name(err));
+    return;
+  }
+  vTaskDelay(pdMS_TO_TICKS(250));
+  esp_restart();
+}
 }
 
 Application::Application()
@@ -355,6 +394,9 @@ void Application::run() {
     const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
     if (ui_.consume_portal_unlock_request()) {
       setup_portal_.request_unlock_pin();
+    }
+    if (ui_.consume_return_to_radar_request()) {
+      reboot_to_other_ota_slot();
     }
     const int switch_idx = ui_.consume_printer_switch_request();
     if (switch_idx >= 0 &&
