@@ -11,6 +11,7 @@
 #include "cJSON.h"
 #include "esp_check.h"
 #include "esp_crt_bundle.h"
+#include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -41,6 +42,7 @@ constexpr uint64_t kPortalSessionExtendMs = 5ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalProvisioningGraceMs = 5ULL * 60ULL * 1000ULL;
 constexpr char kPortalReleaseVersion[] = PRINTSPHERE_RELEASE_VERSION;
 constexpr char kCompanionPrintSphereOtaUrl[] = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/PrintSphere-ota.bin";
+constexpr esp_partition_subtype_t kPrintSphereOtaSubtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
 constexpr char kFaviconSvg[] =
     "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\">"
     "<rect width=\"64\" height=\"64\" rx=\"16\" fill=\"#121a23\"/>"
@@ -75,6 +77,10 @@ std::string json_escape(const std::string& input) {
   }
 
   return output;
+}
+
+const esp_partition_t* printsphere_ota_partition() {
+  return esp_partition_find_first(ESP_PARTITION_TYPE_APP, kPrintSphereOtaSubtype, nullptr);
 }
 
 std::string read_string_field(const cJSON* object, const char* key) {
@@ -4806,15 +4812,22 @@ esp_err_t SetupPortal::handle_ota_upload(httpd_req_t* request) {
     return ESP_OK;
   }
 
-  const esp_partition_t* update_partition = esp_ota_get_next_update_partition(nullptr);
+  const esp_partition_t* update_partition = printsphere_ota_partition();
   if (update_partition == nullptr) {
     httpd_resp_set_status(request, "503 Service Unavailable");
     send_json(request,
-              "{\"error\":\"No OTA partition\",\"detail\":\"This build was flashed without an OTA partition layout.\"}");
+              "{\"error\":\"No PrintSphere OTA partition\",\"detail\":\"Slot ota_1 was not found. Reinstall with the Capsule Companion web installer.\"}");
+    return ESP_OK;
+  }
+  if (static_cast<size_t>(total) > update_partition->size) {
+    httpd_resp_set_status(request, "400 Bad Request");
+    send_json(request,
+              "{\"error\":\"Firmware too large\",\"detail\":\"The uploaded image does not fit the PrintSphere ota_1 slot.\"}");
     return ESP_OK;
   }
 
-  ESP_LOGI(kTag, "OTA upload: %d bytes -> partition '%s'", total, update_partition->label);
+  ESP_LOGI(kTag, "OTA upload: %d bytes -> fixed partition '%s' @ 0x%06x",
+           total, update_partition->label, static_cast<unsigned>(update_partition->address));
 
   esp_ota_handle_t ota_handle = 0;
   esp_err_t err = esp_ota_begin(update_partition, static_cast<size_t>(total), &ota_handle);
@@ -5007,14 +5020,33 @@ void SetupPortal::ota_url_task(void* context) {
 
   ESP_LOGI(kTag, "OTA URL task: %s", url.c_str());
 
+  const esp_partition_t* update_partition = printsphere_ota_partition();
+  if (update_partition == nullptr) {
+    ESP_LOGE(kTag, "OTA URL failed: fixed PrintSphere slot ota_1 not found");
+    {
+      std::lock_guard<std::mutex> lock(portal->ota_url_mutex_);
+      portal->ota_url_status_.state = OtaUrlState::kFailed;
+      portal->ota_url_status_.error = "PrintSphere slot ota_1 not found. Reinstall with the web installer.";
+    }
+    vTaskDelete(nullptr);
+    return;
+  }
+  ESP_LOGI(kTag, "OTA URL fixed slot -> %s @ 0x%06x",
+           update_partition->label, static_cast<unsigned>(update_partition->address));
+
   esp_http_client_config_t http_cfg = {};
   http_cfg.url = url.c_str();
   http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
   http_cfg.timeout_ms = 30000;
   http_cfg.keep_alive_enable = true;
+  http_cfg.disable_auto_redirect = false;
+  http_cfg.max_redirection_count = 5;
 
   esp_https_ota_config_t ota_cfg = {};
   ota_cfg.http_config = &http_cfg;
+  ota_cfg.partition.staging = update_partition;
+  ota_cfg.partition.final = nullptr;
+  ota_cfg.partition.finalize_with_copy = false;
 
   esp_https_ota_handle_t ota_handle = nullptr;
   esp_err_t err = esp_https_ota_begin(&ota_cfg, &ota_handle);
