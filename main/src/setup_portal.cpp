@@ -2343,23 +2343,23 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   if (show_connection_steps) {
     begin_collapsible_section(
         "Firmware Update",
-        "Upload a compiled PrintSphere .bin firmware image to update the device over-the-air without a USB connection.",
+        "PrintSphere updates are installed from the Radar firmware page so the inactive PrintSphere slot can be safely written.",
         "OTA", "idle", false);
-    html += "<div class=\"hint-box\"><strong>Warning:</strong> The device restarts immediately after a successful flash. Only upload firmware built for PrintSphere (ESP32-S3).</div>";
+    html += "<div class=\"hint-box\"><strong>Companion update flow:</strong> PrintSphere runs from <code>ota_1</code>, so it cannot safely overwrite <code>ota_1</code> while it is running. Switch back to Radar, then open <code>/update</code> and use the PrintSphere companion section.</div>";
     html += "<div class=\"field\"><label for=\"ota_file\">Firmware .bin file</label>";
-    html += "<input type=\"file\" id=\"ota_file\" accept=\".bin\"></div>";
+    html += "<input type=\"file\" id=\"ota_file\" accept=\".bin\" disabled></div>";
     html += "<div id=\"ota-progress-wrap\" style=\"display:none;margin:4px 0;height:8px;border-radius:6px;background:#0e1620;overflow:hidden\">";
     html += "<div id=\"ota-progress-bar\" style=\"height:100%;width:0%;background:var(--accent);transition:width .25s;\"></div></div>";
-    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"ota-upload-button\">Upload &amp; Flash</button>";
-    html += "<div class=\"micro\" id=\"ota-status\">Select a .bin file built for PrintSphere (ESP32-S3).</div></div>";
+    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"ota-upload-button\" disabled>Upload disabled here</button>";
+    html += "<div class=\"micro\" id=\"ota-status\">Use Radar's Firmware page to update PrintSphere safely.</div></div>";
     html += "<hr style=\"border:none;border-top:1px solid var(--line);margin:16px 0 4px\">";
     html += "<div class=\"field\"><label for=\"ota_url\">Or flash from URL</label>";
     html += "<input type=\"url\" id=\"ota_url\" value=\"" + std::string(kCompanionPrintSphereOtaUrl) + "\" placeholder=\"" + std::string(kCompanionPrintSphereOtaUrl) + "\" autocomplete=\"off\" spellcheck=\"false\"></div>";
-    html += "<p class=\"micro\">Defaults to the companion PrintSphere firmware from the Lerxtwood/capsule-radar GitHub Release. GitHub blob links are still converted automatically.</p>";
+    html += "<p class=\"micro\">This URL is installed from Radar's Firmware page. Use the button below to switch back to Radar, then open the Firmware tab.</p>";
     html += "<div id=\"ota-url-progress-wrap\" style=\"display:none;margin:4px 0;height:8px;border-radius:6px;background:#0e1620;overflow:hidden\">";
     html += "<div id=\"ota-url-progress-bar\" style=\"height:100%;width:0%;background:var(--accent);transition:width .3s;\"></div></div>";
-    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"ota-url-latest-button\">Use companion latest</button><button type=\"button\" class=\"secondary\" id=\"ota-url-button\">Flash from URL</button>";
-    html += "<div class=\"micro\" id=\"ota-url-status\">Enter a direct .bin URL or a GitHub blob link above.</div></div>";
+    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"ota-url-latest-button\">Use companion latest</button><button type=\"button\" class=\"secondary\" id=\"ota-url-button\">Switch to Radar updater</button>";
+    html += "<div class=\"micro\" id=\"ota-url-status\">Switch to Radar, then use Firmware -> PrintSphere companion.</div></div>";
     end_collapsible_section();
   }
 
@@ -3149,6 +3149,10 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += "if(otaUrlLatestBtn){otaUrlLatestBtn.addEventListener('click',function(){if(otaUrlInput)otaUrlInput.value=COMPANION_PRINTSPHERE_OTA_URL;if(otaUrlStatus)otaUrlStatus.textContent='Ready to flash companion PrintSphere firmware from GitHub Release.';});}if(otaUrlBtn){"
           "otaUrlBtn.addEventListener('click',function(){"
           "if(otaUrlPoll){clearTimeout(otaUrlPoll);otaUrlPoll=null;}"
+          "if(otaUrlStatus)otaUrlStatus.textContent='Switching to Radar. Open http://capsuleradar.local/update after reboot.';"
+          "otaUrlBtn.disabled=true;"
+          "fetch('/api/return-to-radar',{method:'POST'}).catch(function(){});"
+          "return;"
           "var raw=otaUrlInput?githubToRaw(otaUrlInput.value.trim()):'';"
           "if(!raw){if(otaUrlStatus)otaUrlStatus.textContent='Enter a URL first.';return;}"
           "if(raw.indexOf('https://')!==0){if(otaUrlStatus)otaUrlStatus.textContent='Only HTTPS URLs are supported.';return;}"
@@ -4805,6 +4809,11 @@ esp_err_t SetupPortal::handle_ota_upload(httpd_req_t* request) {
     return portal->send_locked_response(request);
   }
 
+  httpd_resp_set_status(request, "409 Conflict");
+  send_json(request,
+            "{\"error\":\"Use Radar updater\",\"detail\":\"PrintSphere cannot update itself while running from ota_1. Switch to Radar and use Firmware -> PrintSphere companion.\"}");
+  return ESP_OK;
+
   const int total = request->content_len;
   if (total <= 0 || total > 8 * 1024 * 1024) {
     httpd_resp_set_status(request, "400 Bad Request");
@@ -4909,6 +4918,11 @@ esp_err_t SetupPortal::handle_ota_url(httpd_req_t* request) {
   if (!portal->is_request_authorized(request)) {
     return portal->send_locked_response(request);
   }
+
+  httpd_resp_set_status(request, "409 Conflict");
+  send_json(request,
+            "{\"error\":\"Use Radar updater\",\"detail\":\"PrintSphere cannot update itself while running from ota_1. Switch to Radar and use Firmware -> PrintSphere companion.\"}");
+  return ESP_OK;
 
   cJSON* root = nullptr;
   esp_err_t parse_err = receive_json_body(request, &root);
