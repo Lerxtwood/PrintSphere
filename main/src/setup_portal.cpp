@@ -2343,23 +2343,12 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   if (show_connection_steps) {
     begin_collapsible_section(
         "Firmware Update",
-        "PrintSphere updates are installed from the Radar firmware page so the inactive PrintSphere slot can be safely written.",
+        "Check the latest companion release and install firmware with the browser web installer.",
         "OTA", "idle", false);
-    html += "<div class=\"hint-box\"><strong>Companion update flow:</strong> PrintSphere runs from <code>ota_1</code>, so it cannot safely overwrite <code>ota_1</code> while it is running. Switch back to Radar, then open <code>/update</code> and use the PrintSphere companion section.</div>";
-    html += "<div class=\"field\"><label for=\"ota_file\">Firmware .bin file</label>";
-    html += "<input type=\"file\" id=\"ota_file\" accept=\".bin\" disabled></div>";
-    html += "<div id=\"ota-progress-wrap\" style=\"display:none;margin:4px 0;height:8px;border-radius:6px;background:#0e1620;overflow:hidden\">";
-    html += "<div id=\"ota-progress-bar\" style=\"height:100%;width:0%;background:var(--accent);transition:width .25s;\"></div></div>";
-    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"ota-upload-button\" disabled>Upload disabled here</button>";
-    html += "<div class=\"micro\" id=\"ota-status\">Use Radar's Firmware page to update PrintSphere safely.</div></div>";
-    html += "<hr style=\"border:none;border-top:1px solid var(--line);margin:16px 0 4px\">";
-    html += "<div class=\"field\"><label for=\"ota_url\">Or flash from URL</label>";
-    html += "<input type=\"url\" id=\"ota_url\" value=\"" + std::string(kCompanionPrintSphereOtaUrl) + "\" placeholder=\"" + std::string(kCompanionPrintSphereOtaUrl) + "\" autocomplete=\"off\" spellcheck=\"false\"></div>";
-    html += "<p class=\"micro\">This URL is installed from Radar's Firmware page. Use the button below to switch back to Radar, then open the Firmware tab.</p>";
-    html += "<div id=\"ota-url-progress-wrap\" style=\"display:none;margin:4px 0;height:8px;border-radius:6px;background:#0e1620;overflow:hidden\">";
-    html += "<div id=\"ota-url-progress-bar\" style=\"height:100%;width:0%;background:var(--accent);transition:width .3s;\"></div></div>";
-    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"ota-url-latest-button\">Use companion latest</button><button type=\"button\" class=\"secondary\" id=\"ota-url-button\">Switch to Radar updater</button>";
-    html += "<div class=\"micro\" id=\"ota-url-status\">Switch to Radar, then use Firmware -> PrintSphere companion.</div></div>";
+    html += "<div class=\"hint-box\"><strong>Firmware installs:</strong> Use the Capsule Companion web installer to update or repair all firmware slots at once.</div>";
+    html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"firmware-check-button\">Check for new firmware</button>";
+    html += "<a class=\"button secondary\" href=\"https://lerxtwood.github.io/capsule-radar/\" target=\"_blank\" rel=\"noopener noreferrer\">Open web installer</a>";
+    html += "<div class=\"micro\" id=\"firmware-status\">Waiting.</div></div>";
     end_collapsible_section();
   }
 
@@ -3087,86 +3076,17 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "catch(e){setStatus('Save failed','',6000);btn.disabled=false;}});});";
 
   html += "(function(){";
-  html += "var otaFile=document.getElementById('ota_file');";
-  html += "var otaBtn=document.getElementById('ota-upload-button');";
-  html += "var otaStatus=document.getElementById('ota-status');";
-  html += "var otaWrap=document.getElementById('ota-progress-wrap');";
-  html += "var otaBar=document.getElementById('ota-progress-bar');";
-  html += "if(!otaBtn||!otaFile)return;";
-  html += "otaBtn.addEventListener('click',function(){";
-  html += "var file=otaFile.files&&otaFile.files[0];";
-  html += "if(!file){otaStatus.textContent='Select a .bin file first.';return;}";
-  html += "if(!confirm('This will flash new firmware and restart PrintSphere. Continue?'))return;";
-  html += "otaBtn.disabled=true;otaWrap.style.display='';otaBar.style.width='0%';";
-  html += "otaStatus.textContent='Uploading...';";
-  html += "var xhr=new XMLHttpRequest();";
-  html += "xhr.upload.onprogress=function(e){if(e.lengthComputable){";
-  html += "var pct=Math.round(e.loaded/e.total*100);";
-  html += "otaBar.style.width=pct+'%';";
-  html += "otaStatus.textContent='Uploading '+pct+'% ('+Math.round(e.loaded/1024)+' KB)';}};";
-  html += "xhr.onload=function(){";
-  html += "var body={};try{body=JSON.parse(xhr.responseText||'{}');}catch(e){}";
-  html += "if(xhr.status===200){otaBar.style.width='100%';";
-  html += "otaStatus.textContent='Flash successful - device is restarting...';";
-  html += "setStatus('Firmware flashed','PrintSphere is rebooting to the new firmware now.',60000);}";
-  html += "else{otaStatus.textContent='Upload failed: '+(body.error||xhr.statusText||'unknown error');otaBtn.disabled=false;}};";
-  html += "xhr.onerror=function(){otaStatus.textContent='Upload failed - network error.';otaBtn.disabled=false;};";
-  html += "xhr.open('POST','/api/ota/upload');";
-  html += "xhr.setRequestHeader('Content-Type','application/octet-stream');";
-  html += "xhr.send(file);});";
-  html += "var otaUrlInput=document.getElementById('ota_url');";
-  html += "var otaUrlBtn=document.getElementById('ota-url-button');var otaUrlLatestBtn=document.getElementById('ota-url-latest-button');var COMPANION_PRINTSPHERE_OTA_URL='https://github.com/Lerxtwood/capsule-radar/releases/latest/download/PrintSphere-ota.bin';";
-  html += "var otaUrlStatus=document.getElementById('ota-url-status');";
-  html += "var otaUrlWrap=document.getElementById('ota-url-progress-wrap');";
-  html += "var otaUrlBar=document.getElementById('ota-url-progress-bar');";
-  html += "var otaUrlPoll=null;";
-  html += "function githubToRaw(u){"
-          "if(u.indexOf('github.com/')===-1)return u;"
-          "var p=u.replace('https://github.com/','');"
-          "var parts=p.split('/');"
-          "if(parts.length<4||parts[2]!=='blob')return u;"
-          "return 'https://raw.githubusercontent.com/'+parts[0]+'/'+parts[1]+'/'+parts.slice(3).join('/');}";
-  html += "function startOtaUrlPoll(){"
-          "var poll=function(){"
-          "fetch('/api/ota/status',{cache:'no-store'})"
-          ".then(function(r){return r.json();})"
-          ".then(function(b){"
-          "if(b.state==='downloading'){"
-          "if(otaUrlWrap)otaUrlWrap.style.display='';"
-          "if(otaUrlBar)otaUrlBar.style.width=(b.progress||0)+'%';"
-          "if(otaUrlStatus)otaUrlStatus.textContent='Downloading '+(b.progress||0)+'%...';"
-          "otaUrlPoll=setTimeout(poll,600);"
-          "}else if(b.state==='done'){"
-          "if(otaUrlBar)otaUrlBar.style.width='100%';"
-          "if(otaUrlStatus)otaUrlStatus.textContent='Flash successful \u2014 device is restarting...';"
-          "setStatus('Firmware flashed','PrintSphere is rebooting to the new firmware now.',60000);"
-          "}else if(b.state==='failed'){"
-          "if(otaUrlStatus)otaUrlStatus.textContent='Flash failed: '+(b.error||'unknown error');"
-          "if(otaUrlBtn)otaUrlBtn.disabled=false;"
-          "}})"
-          ".catch(function(){otaUrlPoll=setTimeout(poll,1500);});"
-          "};otaUrlPoll=setTimeout(poll,600);}";
-  html += "if(otaUrlLatestBtn){otaUrlLatestBtn.addEventListener('click',function(){if(otaUrlInput)otaUrlInput.value=COMPANION_PRINTSPHERE_OTA_URL;if(otaUrlStatus)otaUrlStatus.textContent='Ready to flash companion PrintSphere firmware from GitHub Release.';});}if(otaUrlBtn){"
-          "otaUrlBtn.addEventListener('click',function(){"
-          "if(otaUrlPoll){clearTimeout(otaUrlPoll);otaUrlPoll=null;}"
-          "if(otaUrlStatus)otaUrlStatus.textContent='Switching to Radar. Open http://capsuleradar.local/update after reboot.';"
-          "otaUrlBtn.disabled=true;"
-          "fetch('/api/return-to-radar',{method:'POST'}).catch(function(){});"
-          "return;"
-          "var raw=otaUrlInput?githubToRaw(otaUrlInput.value.trim()):'';"
-          "if(!raw){if(otaUrlStatus)otaUrlStatus.textContent='Enter a URL first.';return;}"
-          "if(raw.indexOf('https://')!==0){if(otaUrlStatus)otaUrlStatus.textContent='Only HTTPS URLs are supported.';return;}"
-          "if(!confirm('Flash firmware from:\\n'+raw+'\\n\\nThe device restarts immediately. Continue?'))return;"
-          "otaUrlBtn.disabled=true;"
-          "if(otaUrlWrap)otaUrlWrap.style.display='';"
-          "if(otaUrlBar)otaUrlBar.style.width='0%';"
-          "if(otaUrlStatus)otaUrlStatus.textContent='Starting download...';"
-          "fetch('/api/ota/url',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:raw})})"
-          ".then(function(r){return r.json().then(function(b){return{ok:r.ok,body:b};});})"
-          ".then(function(res){"
-          "if(res.ok){startOtaUrlPoll();}"
-          "else{if(otaUrlStatus)otaUrlStatus.textContent='Error: '+(res.body&&res.body.error?res.body.error:'request failed');otaUrlBtn.disabled=false;}"
-          "}).catch(function(){if(otaUrlStatus)otaUrlStatus.textContent='Request failed.';otaUrlBtn.disabled=false;});"
+  html += "var fwBtn=document.getElementById('firmware-check-button');";
+  html += "var fwStatus=document.getElementById('firmware-status');";
+  html += "var PRINTSPHERE_MANIFEST='https://github.com/Lerxtwood/capsule-radar/releases/latest/download/printsphere-manifest.json';";
+  html += "if(fwBtn){fwBtn.addEventListener('click',function(){"
+          "fwBtn.disabled=true;"
+          "if(fwStatus)fwStatus.textContent='Checking GitHub release...';"
+          "fetch(PRINTSPHERE_MANIFEST,{cache:'no-store'})"
+          ".then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})"
+          ".then(function(j){if(fwStatus)fwStatus.textContent='Latest PrintSphere companion firmware: v'+(j.version||'?')+'. Use the web installer to install updates.';})"
+          ".catch(function(e){if(fwStatus)fwStatus.textContent='Check failed: '+e.message;})"
+          ".finally(function(){fwBtn.disabled=false;});"
           "});}";
   html += "})();";
   html += "</script>";
@@ -4811,7 +4731,7 @@ esp_err_t SetupPortal::handle_ota_upload(httpd_req_t* request) {
 
   httpd_resp_set_status(request, "409 Conflict");
   send_json(request,
-            "{\"error\":\"Use Radar updater\",\"detail\":\"PrintSphere cannot update itself while running from ota_1. Switch to Radar and use Firmware -> PrintSphere companion.\"}");
+            "{\"error\":\"OTA removed\",\"detail\":\"Use the Capsule Companion web installer: https://lerxtwood.github.io/capsule-radar/\"}");
   return ESP_OK;
 
   const int total = request->content_len;
@@ -4921,7 +4841,7 @@ esp_err_t SetupPortal::handle_ota_url(httpd_req_t* request) {
 
   httpd_resp_set_status(request, "409 Conflict");
   send_json(request,
-            "{\"error\":\"Use Radar updater\",\"detail\":\"PrintSphere cannot update itself while running from ota_1. Switch to Radar and use Firmware -> PrintSphere companion.\"}");
+            "{\"error\":\"OTA removed\",\"detail\":\"Use the Capsule Companion web installer: https://lerxtwood.github.io/capsule-radar/\"}");
   return ESP_OK;
 
   cJSON* root = nullptr;
