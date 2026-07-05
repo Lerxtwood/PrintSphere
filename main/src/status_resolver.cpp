@@ -1084,7 +1084,9 @@ PrinterSnapshot merge_status_sources(const PrinterSnapshot& local_snapshot, bool
       snapshot.chamber_temp_c = 0.0f;
       snapshot.chamber_temp_known = false;
     }
-    if (!printer_model_has_secondary_nozzle_temperature(effective_model)) {
+    const bool live_dual_nozzle_signal = snapshot.active_nozzle_index >= 0;
+    if (!printer_model_has_secondary_nozzle_temperature(effective_model) &&
+        !live_dual_nozzle_signal) {
       snapshot.secondary_nozzle_temp_c = 0.0f;
       snapshot.secondary_nozzle_temp_known = false;
     }

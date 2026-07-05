@@ -1980,14 +1980,49 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   LvglLockGuard::note_phase("temps");
   char temp_buffer[24] = {};
   const bool is_dual_nozzle = snapshot.active_nozzle_index >= 0;
-  const char* active_prefix = is_dual_nozzle ? (snapshot.active_nozzle_index == 1 ? "L " : "R ") : "";
-  const char* secondary_prefix = is_dual_nozzle ? (snapshot.active_nozzle_index == 1 ? "R " : "L ") : "";
-  if (snapshot.nozzle_temp_known || snapshot.nozzle_temp_c > 0.0f) {
-    std::snprintf(temp_buffer, sizeof(temp_buffer), "%s%.0f%s", active_prefix, snapshot.nozzle_temp_c, kDegreeC);
+  const bool active_nozzle_known = snapshot.nozzle_temp_known || snapshot.nozzle_temp_c > 0.0f;
+  const bool secondary_nozzle_known =
+      snapshot.secondary_nozzle_temp_known || snapshot.secondary_nozzle_temp_c > 0.0f;
+  if (is_dual_nozzle) {
+    const bool active_is_left = snapshot.active_nozzle_index == 1;
+    const float left_temp =
+        active_is_left ? snapshot.nozzle_temp_c : snapshot.secondary_nozzle_temp_c;
+    const bool left_known = active_is_left ? active_nozzle_known : secondary_nozzle_known;
+    const float right_temp =
+        active_is_left ? snapshot.secondary_nozzle_temp_c : snapshot.nozzle_temp_c;
+    const bool right_known = active_is_left ? secondary_nozzle_known : active_nozzle_known;
+
+    if (left_known) {
+      std::snprintf(temp_buffer, sizeof(temp_buffer), "L %.0f%s", left_temp, kDegreeC);
+    } else {
+      std::snprintf(temp_buffer, sizeof(temp_buffer), "L --%s", kDegreeC);
+    }
+    set_label_text_if_changed(nozzle_value_label_, temp_buffer);
+    if (right_known) {
+      std::snprintf(temp_buffer, sizeof(temp_buffer), "R %.0f%s", right_temp, kDegreeC);
+    } else {
+      std::snprintf(temp_buffer, sizeof(temp_buffer), "R --%s", kDegreeC);
+    }
+    set_label_text_if_changed(nozzle_aux_label_, temp_buffer);
+    nozzle_aux_visible_ = true;
+    lv_obj_set_style_text_color(nozzle_aux_label_, lv_color_hex(0xFFFFFF), 0);
   } else {
-    std::snprintf(temp_buffer, sizeof(temp_buffer), "%s--%s", active_prefix, kDegreeC);
+    if (active_nozzle_known) {
+      std::snprintf(temp_buffer, sizeof(temp_buffer), "%.0f%s", snapshot.nozzle_temp_c, kDegreeC);
+    } else {
+      std::snprintf(temp_buffer, sizeof(temp_buffer), "--%s", kDegreeC);
+    }
+    set_label_text_if_changed(nozzle_value_label_, temp_buffer);
+
+    const std::string nozzle_aux =
+        optional_temperature_text("Other nozzle", snapshot.secondary_nozzle_temp_c,
+                                  snapshot.secondary_nozzle_temp_known);
+    nozzle_aux_visible_ = !nozzle_aux.empty();
+    if (nozzle_aux_visible_) {
+      set_label_text_if_changed(nozzle_aux_label_, nozzle_aux);
+      lv_obj_set_style_text_color(nozzle_aux_label_, lv_color_hex(0x94A3B8), 0);
+    }
   }
-  set_label_text_if_changed(nozzle_value_label_, temp_buffer);
 
   if (snapshot.bed_temp_known || snapshot.bed_temp_c > 0.0f) {
     std::snprintf(temp_buffer, sizeof(temp_buffer), "%.0f%s", snapshot.bed_temp_c, kDegreeC);
@@ -1995,23 +2030,6 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     std::snprintf(temp_buffer, sizeof(temp_buffer), "--%s", kDegreeC);
   }
   set_label_text_if_changed(bed_value_label_, temp_buffer);
-
-  char nozzle_aux_buf[40] = {};
-  if (is_dual_nozzle &&
-      (snapshot.secondary_nozzle_temp_known || snapshot.secondary_nozzle_temp_c > 0.0f)) {
-    std::snprintf(nozzle_aux_buf, sizeof(nozzle_aux_buf), "%s%.0f%s",
-                  secondary_prefix, snapshot.secondary_nozzle_temp_c, kDegreeC);
-  } else if (!is_dual_nozzle) {
-    const std::string tmp =
-        optional_temperature_text("Other nozzle", snapshot.secondary_nozzle_temp_c,
-                                  snapshot.secondary_nozzle_temp_known);
-    std::snprintf(nozzle_aux_buf, sizeof(nozzle_aux_buf), "%s", tmp.c_str());
-  }
-  const std::string nozzle_aux(nozzle_aux_buf);
-  nozzle_aux_visible_ = !nozzle_aux.empty();
-  if (nozzle_aux_visible_) {
-    set_label_text_if_changed(nozzle_aux_label_, nozzle_aux);
-  }
 
   const std::string bed_aux =
       optional_temperature_text("Chamber", snapshot.chamber_temp_c, snapshot.chamber_temp_known);
@@ -2994,17 +3012,19 @@ esp_err_t Ui::build_dashboard() {
   set_label_text_if_changed(nozzle_value_label_, "--°C");
   lv_obj_set_style_text_font(nozzle_value_label_, dosis32, 0);
   lv_obj_set_style_text_color(nozzle_value_label_, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_align(nozzle_value_label_, LV_ALIGN_CENTER, -132, -10);
+  lv_obj_set_width(nozzle_value_label_, 120);
+  lv_obj_set_style_text_align(nozzle_value_label_, LV_TEXT_ALIGN_LEFT, 0);
+  lv_obj_align(nozzle_value_label_, LV_ALIGN_CENTER, -108, -28);
   set_label_text_if_changed(nozzle_value_label_, std::string("--") + kDegreeC);
 
   nozzle_aux_label_ = lv_label_create(page1_);
   set_label_text_if_changed(nozzle_aux_label_, "");
-  lv_obj_set_width(nozzle_aux_label_, 170);
+  lv_obj_set_width(nozzle_aux_label_, 120);
   lv_label_set_long_mode(nozzle_aux_label_, LV_LABEL_LONG_WRAP);
-  lv_obj_set_style_text_align(nozzle_aux_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_font(nozzle_aux_label_, dosis20, 0);
+  lv_obj_set_style_text_align(nozzle_aux_label_, LV_TEXT_ALIGN_LEFT, 0);
+  lv_obj_set_style_text_font(nozzle_aux_label_, dosis32, 0);
   lv_obj_set_style_text_color(nozzle_aux_label_, lv_color_hex(0x94A3B8), 0);
-  lv_obj_align(nozzle_aux_label_, LV_ALIGN_CENTER, -132, kAuxTempRowY);
+  lv_obj_align(nozzle_aux_label_, LV_ALIGN_CENTER, -108, 8);
   lv_obj_add_flag(nozzle_aux_label_, LV_OBJ_FLAG_HIDDEN);
 
   bed_prefix_label_ = lv_label_create(page1_);
