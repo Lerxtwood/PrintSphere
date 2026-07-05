@@ -1716,12 +1716,14 @@ void Ui::apply_snapshot(const PrinterSnapshot& snapshot) {
     return;
   }
 
-  // Pre-decode preview PNG outside LVGL lock, but only when the preview page is
-  // actually active. The decoded cover is ~1 MB, lives in PSRAM, and is kept
-  // cached across page changes so navigating away doesn't create a decode storm.
+  // Pre-decode preview PNG outside LVGL lock when the preview page is active,
+  // or while printing so the main-page center badge can borrow the same cover
+  // image. The decoded cover is ~1 MB, lives in PSRAM, and is kept cached
+  // across page changes so navigating away doesn't create a decode storm.
   std::shared_ptr<std::vector<uint8_t>> pre_decoded_raw;
   lv_image_dsc_t pre_decoded_dsc{};
   const bool preview_page_active = !scrolling_ && active_page_ == kPageIdxPreview;
+  const bool preview_image_wanted = preview_page_active || snapshot.print_active;
   const bool preview_blob_changed =
       snapshot.preview_blob && !snapshot.preview_blob->empty() &&
       last_preview_blob_.get() != snapshot.preview_blob.get();
@@ -1731,7 +1733,7 @@ void Ui::apply_snapshot(const PrinterSnapshot& snapshot) {
       !preview_blob_changed && snapshot.preview_blob &&
       !snapshot.preview_blob->empty() &&
       (!last_preview_raw_ || last_preview_raw_->empty());
-  if (preview_page_active && (preview_blob_changed || needs_first_decode)) {
+  if (preview_image_wanted && (preview_blob_changed || needs_first_decode)) {
     decode_preview_png(snapshot.preview_blob, &pre_decoded_raw, &pre_decoded_dsc);
   }
 
@@ -1874,6 +1876,11 @@ bool Ui::ensure_preview_image_loaded_locked(
 }
 
 void Ui::release_preview_image_locked() {
+  if (logo_preview_active_ && logo_image_ != nullptr) {
+    lv_image_set_src(logo_image_, &bambuicon_small);
+    lv_image_set_scale(logo_image_, 183);
+    logo_preview_active_ = false;
+  }
   if (page2_image_ != nullptr) {
     lv_image_set_src(page2_image_, nullptr);
   }
@@ -2090,7 +2097,8 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   if (snapshot.preview_blob && !snapshot.preview_blob->empty()) {
     const bool preview_blob_changed = last_preview_blob_.get() != snapshot.preview_blob.get();
     last_preview_blob_ = snapshot.preview_blob;
-    if (active_page_ == kPageIdxPreview) {
+    const bool preview_image_wanted = active_page_ == kPageIdxPreview || snapshot.print_active;
+    if (preview_image_wanted) {
       LvglLockGuard::note_phase("preview_image_load");
       has_preview_image = ensure_preview_image_loaded_locked(
           preview_blob_changed, std::move(pre_decoded_raw), pre_decoded_dsc);
@@ -2221,6 +2229,25 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
 
   show_logo_ = should_show_logo(snapshot);
+  const bool use_preview_logo =
+      snapshot.print_active && has_preview_image && last_preview_raw_ && !last_preview_raw_->empty();
+  if (logo_image_ != nullptr) {
+    if (use_preview_logo) {
+      if (!logo_preview_active_) {
+        lv_image_set_src(logo_image_, &preview_image_dsc_);
+        const uint16_t max_dim =
+            std::max<uint16_t>(preview_image_dsc_.header.w, preview_image_dsc_.header.h);
+        const int32_t scale = max_dim > 0U ? std::max<int32_t>(32, (112 * 256) / max_dim) : 183;
+        lv_image_set_scale(logo_image_, scale);
+        lv_obj_set_style_image_recolor_opa(logo_image_, LV_OPA_TRANSP, 0);
+        logo_preview_active_ = true;
+      }
+    } else if (logo_preview_active_) {
+      lv_image_set_src(logo_image_, &bambuicon_small);
+      lv_image_set_scale(logo_image_, 183);
+      logo_preview_active_ = false;
+    }
+  }
   const bool chamber_light_clickable = snapshot.chamber_light_supported;
   if (logo_clickable_ != chamber_light_clickable) {
     set_clickable(logo_badge_, chamber_light_clickable);
@@ -2228,7 +2255,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
 
   const bool logo_recolor_enabled =
-      snapshot.chamber_light_supported && snapshot.chamber_light_state_known &&
+      !logo_preview_active_ && snapshot.chamber_light_supported && snapshot.chamber_light_state_known &&
       !snapshot.chamber_light_on;
   const uint32_t logo_recolor_hex = logo_recolor_enabled ? 0x7A7A7A : 0U;
   if (logo_recolor_enabled != logo_recolor_enabled_ ||

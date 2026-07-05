@@ -786,7 +786,7 @@ void Application::run() {
 
     const bool on_battery = power.available && power.battery_present && !power.usb_present;
     const bool preview_pipeline_enabled =
-        source_mode_ == SourceMode::kCloudOnly || preview_page_active;
+        source_mode_ == SourceMode::kCloudOnly || preview_page_active || snapshot.print_active;
     cloud_client_.set_preview_fetch_enabled(source_mode_ != SourceMode::kLocalOnly &&
                                             preview_pipeline_enabled);
     const bool provisioning_active =

@@ -315,6 +315,7 @@ class Ui {
   uint16_t last_camera_width_ = 0;
   uint16_t last_camera_height_ = 0;
   bool logo_clickable_ = false;
+  bool logo_preview_active_ = false;
   bool logo_recolor_enabled_ = false;
   uint32_t logo_recolor_hex_ = 0;
   bool portal_lock_enabled_ = true;
