@@ -41,6 +41,7 @@ constexpr uint64_t kPortalSessionLifetimeMs = 10ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalSessionExtendMs = 5ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalProvisioningGraceMs = 5ULL * 60ULL * 1000ULL;
 constexpr char kPortalReleaseVersion[] = PRINTSPHERE_RELEASE_VERSION;
+constexpr char kCompanionPrintSphereManifestUrl[] = "https://api.github.com/repos/Lerxtwood/capsule-radar/releases/latest";
 constexpr char kCompanionPrintSphereOtaUrl[] = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/PrintSphere-ota.bin";
 constexpr esp_partition_subtype_t kPrintSphereOtaSubtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
 constexpr char kFaviconSvg[] =
@@ -77,6 +78,37 @@ std::string json_escape(const std::string& input) {
   }
 
   return output;
+}
+
+std::string normalized_version(std::string version) {
+  if (!version.empty() && (version.front() == 'v' || version.front() == 'V')) {
+    version.erase(version.begin());
+  }
+  return version;
+}
+
+struct FirmwareManifestFetchContext {
+  std::string body;
+  bool truncated = false;
+};
+
+esp_err_t firmware_manifest_http_event_handler(esp_http_client_event_t* event) {
+  auto* context = static_cast<FirmwareManifestFetchContext*>(event->user_data);
+  if (context == nullptr || event->event_id != HTTP_EVENT_ON_DATA || event->data == nullptr ||
+      event->data_len <= 0) {
+    return ESP_OK;
+  }
+  constexpr size_t kMaxManifestBytes = 32768;
+  const size_t remaining = kMaxManifestBytes > context->body.size()
+                               ? kMaxManifestBytes - context->body.size()
+                               : 0;
+  if (static_cast<size_t>(event->data_len) > remaining) {
+    context->truncated = true;
+    return ESP_FAIL;
+  }
+  context->body.append(static_cast<const char*>(event->data),
+                       static_cast<size_t>(event->data_len));
+  return ESP_OK;
 }
 
 const esp_partition_t* printsphere_ota_partition() {
@@ -1019,7 +1051,7 @@ esp_err_t SetupPortal::start() {
   config.server_port = 80;
   config.stack_size = 12288;  // 8192 was too small — handle_root builds ~40KB HTML on the stack
   // Leave some headroom for portal endpoints so feature additions do not silently exhaust slots.
-  config.max_uri_handlers = 32;
+  config.max_uri_handlers = 36;
   config.recv_wait_timeout = 30;
 
   ESP_RETURN_ON_ERROR(httpd_start(&server_, &config), kTag, "httpd_start failed");
@@ -1255,6 +1287,14 @@ esp_err_t SetupPortal::start() {
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &session_extend_uri), kTag,
                       "session extend handler failed");
 
+  httpd_uri_t firmware_check_uri = {};
+  firmware_check_uri.uri = "/api/firmware/check";
+  firmware_check_uri.method = HTTP_GET;
+  firmware_check_uri.handler = &SetupPortal::handle_firmware_check;
+  firmware_check_uri.user_ctx = this;
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &firmware_check_uri), kTag,
+                      "firmware check handler failed");
+
   httpd_uri_t ota_upload_uri = {};
   ota_upload_uri.uri = "/api/ota/upload";
   ota_upload_uri.method = HTTP_POST;
@@ -1420,11 +1460,6 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   const char* wifi_section_badge_class =
       wifi_connected ? "ok" : (wifi_configured ? "info" : "warn");
   const std::string rotation_section_badge_value = display_rotation_badge_value(display_rotation);
-  const std::string portal_lock_badge_value =
-      setup_ap_active ? "Open in setup AP"
-                      : (portal_lock_enabled ? "PIN lock on" : "Open on LAN");
-  const char* portal_lock_badge_class =
-      setup_ap_active ? "info" : (portal_lock_enabled ? "info" : "warn");
   const std::string ams_display_badge_value = filament_wake || !filament_anim ? "On" : "Off";
   const char* ams_display_badge_class = filament_wake || !filament_anim ? "info" : "idle";
   const std::string arc_badge_value = arc_colors_custom ? "Custom" : "Default";
@@ -2149,29 +2184,14 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
 
     begin_settings_panel(
         "Portal Access",
-        "PIN protection for the web portal on your home network after provisioning.",
-        portal_lock_badge_value, portal_lock_badge_class, portal_access_section_open);
-    html += "<div class=\"field\"><label for=\"portal_lock_enabled\">Portal Lock</label><select id=\"portal_lock_enabled\">";
-    html += "<option value=\"true\"";
-    if (portal_lock_enabled) {
-      html += " selected";
-    }
-    html += ">Enabled: require PIN unlock on the home network</option>";
-    html += "<option value=\"false\"";
-    if (!portal_lock_enabled) {
-      html += " selected";
-    }
-    html += ">Disabled: keep the portal open on the home network</option></select></div>";
-    html += "<div class=\"actions\"><button type=\"button\" class=\"primary hidden\" id=\"portal-access-apply-button\">Apply + Restart</button>";
-    html += "<div class=\"micro hidden\" id=\"portal-access-apply-hint\">Portal access changes apply after the ESP restarts so the new lock mode is active immediately.</div></div>";
-    html += "<div class=\"hint-box\"><strong>Security:</strong> ";
+        "Web Config is open on your local network; no display PIN is required.",
+        "Open on LAN", "ok", portal_access_section_open);
+    html += "<div class=\"hint-box\"><strong>Access:</strong> ";
     html += setup_ap_active
-                ? "The portal always stays open while the setup access point is active."
-                : (portal_lock_enabled
-                       ? "Long-press on the device display to show a temporary 6-digit unlock PIN whenever you need browser access."
-                       : "With the PIN lock disabled, anyone on the same home network can open Web Config without the device-generated PIN.");
+                ? "The portal is open while the setup access point is active."
+                : "The portal stays open on your home network, so you can make PrintSphere changes without generating an unlock PIN on the device.";
     html += "</div>";
-    html += "<p class=\"micro\">The lock never applies while PrintSphere is still in setup AP mode.</p>";
+    html += "<p class=\"micro\">This companion build relies on your local Wi-Fi boundary instead of a device-generated web PIN.</p>";
     end_settings_panel();
     html += "</div>";
     end_collapsible_section();
@@ -3078,13 +3098,12 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += "(function(){";
   html += "var fwBtn=document.getElementById('firmware-check-button');";
   html += "var fwStatus=document.getElementById('firmware-status');";
-  html += "var PRINTSPHERE_MANIFEST='https://github.com/Lerxtwood/capsule-radar/releases/latest/download/printsphere-manifest.json';";
   html += "if(fwBtn){fwBtn.addEventListener('click',function(){"
           "fwBtn.disabled=true;"
           "if(fwStatus)fwStatus.textContent='Checking GitHub release...';"
-          "fetch(PRINTSPHERE_MANIFEST,{cache:'no-store'})"
-          ".then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})"
-          ".then(function(j){if(fwStatus)fwStatus.textContent='Latest PrintSphere companion firmware: v'+(j.version||'?')+'. Use the web installer to install updates.';})"
+          "fetch('/api/firmware/check',{cache:'no-store'})"
+          ".then(function(r){return r.json().catch(function(){return {ok:false,error:'HTTP '+r.status};});})"
+          ".then(function(j){if(!j.ok)throw new Error(j.error||'Check failed');if(fwStatus)fwStatus.textContent=(j.update_available?'New PrintSphere firmware available: ':'Latest PrintSphere companion firmware: ')+(j.latest_version||'?')+'. Current: '+(j.current_version||'?')+'. Use the web installer to install updates.';})"
           ".catch(function(e){if(fwStatus)fwStatus.textContent='Check failed: '+e.message;})"
           ".finally(function(){fwBtn.disabled=false;});"
           "});}";
@@ -3302,6 +3321,94 @@ esp_err_t SetupPortal::handle_session_extend(httpd_req_t* request) {
   std::string body = "{\"status\":\"ok\",\"remaining_s\":";
   body += std::to_string(remaining_s);
   body += "}";
+  send_json(request, body);
+  return ESP_OK;
+}
+
+esp_err_t SetupPortal::handle_firmware_check(httpd_req_t* request) {
+  auto* portal = static_cast<SetupPortal*>(request->user_ctx);
+  if (portal == nullptr) {
+    return ESP_FAIL;
+  }
+  if (!portal->is_request_authorized(request)) {
+    return portal->send_locked_response(request);
+  }
+
+  FirmwareManifestFetchContext context;
+  esp_http_client_config_t config = {};
+  config.url = kCompanionPrintSphereManifestUrl;
+  config.timeout_ms = 12000;
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.event_handler = firmware_manifest_http_event_handler;
+  config.user_data = &context;
+  config.user_agent = "PrintSphere/" PRINTSPHERE_RELEASE_VERSION;
+  config.buffer_size = 1024;
+  config.buffer_size_tx = 512;
+  config.disable_auto_redirect = false;
+  config.max_redirection_count = 5;
+
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == nullptr) {
+    httpd_resp_set_status(request, "500 Internal Server Error");
+    send_json(request, "{\"ok\":false,\"error\":\"Could not create HTTP client\"}");
+    return ESP_OK;
+  }
+
+  const esp_err_t err = esp_http_client_perform(client);
+  const int status = esp_http_client_get_status_code(client);
+  esp_http_client_cleanup(client);
+
+  if (err != ESP_OK || status < 200 || status >= 300 || context.truncated ||
+      context.body.empty()) {
+    ESP_LOGW(kTag, "Firmware manifest check failed: err=%s http=%d bytes=%u truncated=%d",
+             esp_err_to_name(err), status, static_cast<unsigned>(context.body.size()),
+             context.truncated ? 1 : 0);
+    std::string body = "{\"ok\":false,\"error\":\"Manifest request failed";
+    if (err != ESP_OK) {
+      body += ": ";
+      body += esp_err_to_name(err);
+    } else if (status > 0) {
+      body += " with HTTP ";
+      body += std::to_string(status);
+    }
+    body += "\"}";
+    send_json(request, body);
+    return ESP_OK;
+  }
+
+  cJSON* root = cJSON_ParseWithLength(context.body.c_str(), context.body.size());
+  if (root == nullptr) {
+    ESP_LOGW(kTag, "Firmware manifest parse failed, bytes=%u",
+             static_cast<unsigned>(context.body.size()));
+    send_json(request, "{\"ok\":false,\"error\":\"Manifest JSON parse failed\"}");
+    return ESP_OK;
+  }
+
+  const cJSON* version_item = cJSON_GetObjectItemCaseSensitive(root, "version");
+  if (!cJSON_IsString(version_item) || version_item->valuestring == nullptr) {
+    version_item = cJSON_GetObjectItemCaseSensitive(root, "tag_name");
+  }
+  std::string latest_version;
+  if (cJSON_IsString(version_item) && version_item->valuestring != nullptr) {
+    latest_version = version_item->valuestring;
+  }
+  cJSON_Delete(root);
+
+  if (latest_version.empty()) {
+    send_json(request, "{\"ok\":false,\"error\":\"Release response did not include a version\"}");
+    return ESP_OK;
+  }
+
+  const std::string current_version = normalized_version(kPortalReleaseVersion);
+  const std::string latest_display_version = normalized_version(latest_version);
+  const bool update_available = latest_display_version != current_version;
+  std::string body = "{\"ok\":true,\"current_version\":\"";
+  body += json_escape(current_version);
+  body += "\",\"latest_version\":\"";
+  body += json_escape(latest_display_version);
+  body += "\",\"update_available\":";
+  body += update_available ? "true" : "false";
+  body += ",\"installer_url\":\"https://lerxtwood.github.io/capsule-radar/\"}";
   send_json(request, body);
   return ESP_OK;
 }

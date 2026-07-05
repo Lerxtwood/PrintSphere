@@ -18,6 +18,7 @@ namespace printsphere {
 namespace {
 constexpr char kTag[] = "printsphere.cfg";
 constexpr char kNamespace[] = "printsphere";
+constexpr char kSharedNamespace[] = "capsule_shared";
 constexpr char kDeviceName[] = "PrintSphere";
 
 std::string color_to_html_hex(uint32_t color) {
@@ -71,6 +72,29 @@ bool parse_bool_or_default(const std::string& value, bool fallback) {
     return false;
   }
   return fallback;
+}
+
+std::string load_nvs_string(const char* ns, const char* key) {
+  nvs_handle_t handle = 0;
+  if (nvs_open(ns, NVS_READONLY, &handle) != ESP_OK) {
+    return {};
+  }
+
+  size_t required = 0;
+  esp_err_t err = nvs_get_str(handle, key, nullptr, &required);
+  if (err != ESP_OK || required == 0) {
+    nvs_close(handle);
+    return {};
+  }
+
+  std::vector<char> buffer(required, 0);
+  err = nvs_get_str(handle, key, buffer.data(), &required);
+  nvs_close(handle);
+  if (err != ESP_OK) {
+    return {};
+  }
+
+  return std::string(buffer.data());
 }
 }
 
@@ -206,6 +230,14 @@ WifiCredentials ConfigStore::load_wifi_credentials() const {
   WifiCredentials credentials;
   credentials.ssid = load_string("wifi_ssid");
   credentials.password = load_string("wifi_pass");
+  if (credentials.ssid.empty()) {
+    credentials.ssid = load_nvs_string(kSharedNamespace, "wifi_ssid");
+    credentials.password = load_nvs_string(kSharedNamespace, "wifi_pass");
+    if (!credentials.ssid.empty()) {
+      ESP_LOGI(kTag, "Imported shared Wi-Fi credentials from Capsule Radar (ssid=%s)",
+               credentials.ssid.c_str());
+    }
+  }
   return credentials;
 }
 
@@ -234,7 +266,11 @@ DisplayRotation ConfigStore::load_display_rotation() const {
 }
 
 bool ConfigStore::load_portal_lock_enabled() const {
-  return parse_bool_or_default(load_string("portal_lock"), true);
+  // In the Capsule Companion build, PrintSphere is installed alongside Radar/TamaPoke
+  // and the web portal is only used on the owner's local network.  The display PIN
+  // lock made normal configuration feel clumsy, especially when switching between
+  // firmware slots, so keep the portal open regardless of any older stored value.
+  return false;
 }
 
 bool ConfigStore::load_filament_wake_enabled() const {
@@ -438,26 +474,7 @@ esp_err_t ConfigStore::save_string(const char* key, const std::string& value) co
 }
 
 std::string ConfigStore::load_string(const char* key) const {
-  nvs_handle_t handle = 0;
-  if (nvs_open(kNamespace, NVS_READONLY, &handle) != ESP_OK) {
-    return {};
-  }
-
-  size_t required = 0;
-  esp_err_t err = nvs_get_str(handle, key, nullptr, &required);
-  if (err != ESP_OK || required == 0) {
-    nvs_close(handle);
-    return {};
-  }
-
-  std::vector<char> buffer(required, 0);
-  err = nvs_get_str(handle, key, buffer.data(), &required);
-  nvs_close(handle);
-  if (err != ESP_OK) {
-    return {};
-  }
-
-  return std::string(buffer.data());
+  return load_nvs_string(kNamespace, key);
 }
 
 // ---------------------------------------------------------------------------

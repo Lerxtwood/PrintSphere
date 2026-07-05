@@ -80,6 +80,7 @@ class SetupPortal {
   static esp_err_t handle_printers_delete(httpd_req_t* request);
   static esp_err_t handle_printers_clear_local(httpd_req_t* request);
   static esp_err_t handle_session_extend(httpd_req_t* request);
+  static esp_err_t handle_firmware_check(httpd_req_t* request);
   static esp_err_t handle_ota_upload(httpd_req_t* request);
   static esp_err_t handle_ota_url(httpd_req_t* request);
   static esp_err_t handle_ota_status(httpd_req_t* request);
