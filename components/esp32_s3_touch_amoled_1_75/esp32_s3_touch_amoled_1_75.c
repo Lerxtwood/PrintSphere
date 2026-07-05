@@ -661,7 +661,7 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void)
 #define LVGL_TICK_PERIOD_MS (CONFIG_BSP_DISPLAY_LVGL_TICK)
 #define LVGL_MAX_SLEEP_MS (CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP)
 #define BSP_LCD_QSPI_PCLK_HZ (80 * 1000 * 1000)
-#define LVGL_BUFFER_HEIGHT_INTERNAL (12)
+#define LVGL_BUFFER_HEIGHT_INTERNAL (24)
 
 esp_err_t bsp_display_brightness_init(void)
 {
@@ -897,7 +897,7 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
             .ver_res = BSP_LCD_V_RES,
             .buffer_height = buffer_height,
             .use_psram = use_psram,
-            .enable_ppa_accel = false,
+            .enable_ppa_accel = true,
             .require_double_buffer = use_psram && !use_te_sync,
         },
         .tear_avoid_mode = tear_mode,
