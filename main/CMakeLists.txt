@@ -6,6 +6,7 @@ set(PRINTSPHERE_MAIN_REQUIRES
     esp_event
     esp_http_client
     esp_http_server
+    mdns
     mqtt
     esp_netif
     lwip

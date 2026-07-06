@@ -14,6 +14,7 @@
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
+#include "mdns.h"
 #include "esp_ota_ops.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -40,8 +41,9 @@ constexpr uint64_t kPortalPinLifetimeMs = 2ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalSessionLifetimeMs = 10ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalSessionExtendMs = 5ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalProvisioningGraceMs = 5ULL * 60ULL * 1000ULL;
+constexpr char kMdnsHostname[] = "printsphere";
 constexpr char kPortalReleaseVersion[] = PRINTSPHERE_RELEASE_VERSION;
-constexpr char kCompanionPrintSphereManifestUrl[] = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/printsphere-manifest.json";
+constexpr char kCompanionPrintSphereManifestUrl[] = "https://lerxtwood.github.io/capsule-radar/printsphere-manifest.json";
 constexpr char kCompanionPrintSphereOtaUrl[] = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/PrintSphere-ota.bin";
 constexpr esp_partition_subtype_t kPrintSphereOtaSubtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
 constexpr char kFaviconSvg[] =
@@ -1079,6 +1081,20 @@ esp_err_t SetupPortal::start() {
   config.recv_wait_timeout = 30;
 
   ESP_RETURN_ON_ERROR(httpd_start(&server_, &config), kTag, "httpd_start failed");
+
+  esp_err_t mdns_err = mdns_init();
+  if (mdns_err == ESP_ERR_INVALID_STATE) {
+    mdns_err = ESP_OK;
+  }
+  if (mdns_err == ESP_OK) {
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_hostname_set(kMdnsHostname));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_instance_name_set("PrintSphere"));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+        mdns_service_add("PrintSphere Web Config", "_http", "_tcp", 80, nullptr, 0));
+    ESP_LOGI(kTag, "mDNS ready: http://%s.local/", kMdnsHostname);
+  } else {
+    ESP_LOGW(kTag, "mDNS init failed: %s", esp_err_to_name(mdns_err));
+  }
 
   httpd_uri_t root_uri = {};
   root_uri.uri = "/";

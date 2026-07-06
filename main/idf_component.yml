@@ -9,3 +9,5 @@ dependencies:
     version: "^1.7.19"
   espressif/mqtt:
     version: "^1.0.0"
+  espressif/mdns:
+    version: "^1.8.2"
