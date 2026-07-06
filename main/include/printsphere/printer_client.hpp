@@ -94,10 +94,13 @@ class PrinterClient {
     int hw_switch_state = -1;
     int tray_now = -1;
     int tray_tar = -1;
+    int left_tray_now = -1;
+    int left_tray_tar = -1;
     int ams_status_main = -1;
     int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
     bool ams_filament_change_latched = false;
     std::shared_ptr<AmsSnapshot> ams;
+    std::shared_ptr<AmsSnapshot> left_ams;
   };
 
  private:

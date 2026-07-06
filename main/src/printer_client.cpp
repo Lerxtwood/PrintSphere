@@ -926,35 +926,58 @@ NozzleTemperatureBundle extract_nozzle_temperature_bundle(const cJSON* print, fl
   return bundle;
 }
 
+struct SnowTrayInfo {
+  bool present = false;
+  int ams_id = -1;
+  int slot_id = -1;
+  int mapped_tray = -1;
+};
+
 // Extract tray_now override from device.extruder.info[].snow (V2 protocol).
 // P2S, H2, and newer Bambu printers send the active slot via the "snow" field
 // in device.extruder.info[] alongside (or instead of) the legacy ams.tray_now.
 // snow encoding: bits[0:7] = slot_id, bits[8:15] = ams_id.
 // ams_id == 255 means external spool (VIRTUAL_TRAY_MAIN_ID).
-// Returns the mapped tray_now value, or -1 if no snow field is present.
-int extract_extruder_snow_tray_now(const cJSON* print) {
+SnowTrayInfo extract_extruder_snow_tray_info(const cJSON* print, int extruder_id = 0) {
   const cJSON* device = child_object_local(print, "device");
-  if (device == nullptr) return -1;
+  if (device == nullptr) return {};
   const cJSON* extruder = child_object_local(device, "extruder");
-  if (extruder == nullptr) return -1;
+  if (extruder == nullptr) return {};
   const cJSON* info_array = cJSON_GetObjectItemCaseSensitive(extruder, "info");
-  if (!cJSON_IsArray(info_array)) return -1;
+  if (!cJSON_IsArray(info_array)) return {};
 
   const cJSON* item = nullptr;
   cJSON_ArrayForEach(item, info_array) {
     const int id = json_int_local(item, "id", -1);
-    if (id != 0) continue;  // Primary extruder only.
+    if (id != extruder_id) continue;
     const cJSON* snow_item = cJSON_GetObjectItemCaseSensitive(item, "snow");
-    if (snow_item == nullptr || !cJSON_IsNumber(snow_item)) return -1;
+    if (snow_item == nullptr || !cJSON_IsNumber(snow_item)) return {};
 
     const int snow = snow_item->valueint;
     const int ams_id = (snow >> 8) & 0xFF;
     const int slot_id = snow & 0xFF;
-    ESP_LOGI(kTag, "[DIAG] extruder snow: raw=%d ams_id=%d slot_id=%d", snow, ams_id, slot_id);
+    ESP_LOGI(kTag, "[DIAG] extruder snow[%d]: raw=%d ams_id=%d slot_id=%d",
+             extruder_id, snow, ams_id, slot_id);
 
-    if (ams_id == 255) return 254;        // External spool.
-    if (ams_id >= 128) return ams_id;     // AMS HT (single-tray).
-    return ams_id * 4 + slot_id;          // Standard AMS.
+    SnowTrayInfo info;
+    info.present = true;
+    info.ams_id = ams_id;
+    info.slot_id = slot_id;
+    if (ams_id == 255) {
+      info.mapped_tray = 254;             // External spool.
+    } else if (ams_id >= 128) {
+      info.mapped_tray = ams_id;          // AMS-HT / one-spool unit.
+    } else {
+      info.mapped_tray = ams_id * 4 + slot_id;  // Standard AMS.
+    }
+    return info;
+  }
+  return {};
+}
+
+int first_free_ams_unit_slot(const bool claimed[kMaxAmsUnits]) {
+  for (int i = 0; i < kMaxAmsUnits; ++i) {
+    if (!claimed[i]) return i;
   }
   return -1;
 }
@@ -1376,8 +1399,11 @@ PrinterSnapshot PrinterClient::build_snapshot_from_runtime(
   snapshot.hw_switch_state = runtime.hw_switch_state;
   snapshot.tray_now = runtime.tray_now;
   snapshot.tray_tar = runtime.tray_tar;
+  snapshot.left_tray_now = runtime.left_tray_now;
+  snapshot.left_tray_tar = runtime.left_tray_tar;
   snapshot.ams_status_main = runtime.ams_status_main;
   snapshot.ams = runtime.ams;
+  snapshot.left_ams = runtime.left_ams;
   return snapshot;
 }
 
@@ -1879,12 +1905,13 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
       // V2 protocol override: P2S/H2 series send device.extruder.info[].snow which is
       // the authoritative source for the active tray on newer printers.  Map it back to
       // legacy tray_now encoding so all downstream ext-spool / AMS-tray logic works.
-      const int snow_tray = extract_extruder_snow_tray_now(print);
-      if (snow_tray >= 0 && snow_tray != effective_tray_now) {
+      const SnowTrayInfo right_snow = extract_extruder_snow_tray_info(print);
+      if (right_snow.mapped_tray >= 0 && right_snow.mapped_tray != effective_tray_now) {
         ESP_LOGI(kTag, "tray_now override from snow: ams.tray_now=%d -> snow=%d",
-                 effective_tray_now, snow_tray);
-        effective_tray_now = snow_tray;
+                 effective_tray_now, right_snow.mapped_tray);
+        effective_tray_now = right_snow.mapped_tray;
       }
+      const SnowTrayInfo left_snow = extract_extruder_snow_tray_info(print, 1);
 
       if (effective_tray_now != runtime.tray_now || new_tray_tar != runtime.tray_tar) {
         ESP_LOGI(kTag, "tray: now=%d->%d tar=%d->%d",
@@ -1892,19 +1919,69 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
         runtime.tray_now = effective_tray_now;
         runtime.tray_tar = new_tray_tar;
       }
+      if (left_snow.mapped_tray >= 0 && left_snow.mapped_tray != runtime.left_tray_now) {
+        ESP_LOGI(kTag, "left tray_now from snow: %d->%d",
+                 runtime.left_tray_now, left_snow.mapped_tray);
+        runtime.left_tray_now = left_snow.mapped_tray;
+      }
 
       // Parse per-unit AMS tray data: material, color, humidity, temperature.
       const cJSON* ams_array = cJSON_GetObjectItemCaseSensitive(ams_obj, "ams");
       if (ams_array != nullptr && cJSON_IsArray(ams_array)) {
-        if (!runtime.ams) runtime.ams = std::make_shared<AmsSnapshot>();
+        auto parsed_ams = std::make_shared<AmsSnapshot>();
+        auto parsed_left_ams = std::make_shared<AmsSnapshot>();
         uint8_t unit_count = 0;
+        uint8_t left_unit_count = 0;
+        bool right_unit_claimed[kMaxAmsUnits] = {};
+        bool left_unit_claimed[kMaxAmsUnits] = {};
+        const cJSON* reserve_unit = nullptr;
+        cJSON_ArrayForEach(reserve_unit, ams_array) {
+          const int reserve_raw_id = json_int(reserve_unit, "id", -1);
+          if (reserve_raw_id >= 0 && reserve_raw_id < kMaxAmsUnits) {
+            right_unit_claimed[reserve_raw_id] = true;
+          }
+        }
         const cJSON* ams_unit = nullptr;
         cJSON_ArrayForEach(ams_unit, ams_array) {
-          const int unit_id = json_int(ams_unit, "id", -1);
+          const int raw_unit_id = json_int(ams_unit, "id", -1);
+          if (raw_unit_id < 0) continue;
+          const bool single_tray_unit = raw_unit_id >= 128;
+          bool left_bank = false;
+          int unit_id = -1;
+          if (single_tray_unit) {
+            if (left_snow.present && left_snow.ams_id == raw_unit_id) {
+              left_bank = true;
+            } else if (right_snow.present && right_snow.ams_id == raw_unit_id) {
+              left_bank = false;
+            } else {
+              // Layout fallback for AMS-HT units that are not currently active:
+              // first unclaimed HT belongs to the left nozzle, later ones fill
+              // the right bank after any standard AMS units.
+              left_bank = (first_free_ams_unit_slot(left_unit_claimed) >= 0 &&
+                           left_unit_count == 0);
+            }
+            unit_id = first_free_ams_unit_slot(left_bank ? left_unit_claimed
+                                                        : right_unit_claimed);
+          } else {
+            left_bank = false;
+            unit_id = raw_unit_id;
+          }
           if (unit_id < 0 || unit_id >= kMaxAmsUnits) continue;
-          AmsUnitInfo& unit = runtime.ams->units[unit_id];
+          if (left_bank) {
+            left_unit_claimed[unit_id] = true;
+          } else {
+            right_unit_claimed[unit_id] = true;
+          }
+          std::shared_ptr<AmsSnapshot>& target_ams = left_bank ? parsed_left_ams : parsed_ams;
+          AmsUnitInfo& unit = target_ams->units[unit_id];
           unit.present = true;
-          if (unit_id >= unit_count) unit_count = unit_id + 1;
+          unit.single_tray = single_tray_unit;
+          unit.raw_id = raw_unit_id;
+          if (left_bank) {
+            if (unit_id >= left_unit_count) left_unit_count = unit_id + 1;
+          } else {
+            if (unit_id >= unit_count) unit_count = unit_id + 1;
+          }
 
           const int humidity_raw = json_int(ams_unit, "humidity_raw", -1);
           if (humidity_raw >= 0 && humidity_raw <= 100) {
@@ -1925,7 +2002,10 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
           if (tray_array != nullptr && cJSON_IsArray(tray_array)) {
             const cJSON* tray_obj = nullptr;
             cJSON_ArrayForEach(tray_obj, tray_array) {
-              const int tray_id = json_int(tray_obj, "id", -1);
+              int tray_id = json_int(tray_obj, "id", -1);
+              if (single_tray_unit && tray_id >= 0) {
+                tray_id = 0;
+              }
               if (tray_id < 0 || tray_id >= kMaxAmsTrays) continue;
               AmsTrayInfo& tray = unit.trays[tray_id];
 
@@ -1970,11 +2050,20 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
 
               // Mark active based on global tray_now (which may include snow override).
               const int global_tray_idx = unit_id * kMaxAmsTrays + tray_id;
-              tray.active = (runtime.tray_now == global_tray_idx);
+              const int active_key = single_tray_unit ? raw_unit_id : global_tray_idx;
+              tray.active = left_bank ? (runtime.left_tray_now == active_key)
+                                      : (runtime.tray_now == active_key);
             }
           }
         }
-        if (unit_count > runtime.ams->count) runtime.ams->count = unit_count;
+        parsed_ams->count = unit_count;
+        parsed_left_ams->count = left_unit_count;
+        runtime.ams = parsed_ams;
+        if (left_unit_count > 0) {
+          runtime.left_ams = parsed_left_ams;
+        } else {
+          runtime.left_ams.reset();
+        }
 
         // AMS tray diagnostics — log only the unit/trays whose visible state changed.
         const AmsUnitInfo empty_unit = {};

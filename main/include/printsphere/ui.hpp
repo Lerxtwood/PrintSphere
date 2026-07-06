@@ -24,13 +24,15 @@ class Ui {
  public:
   // Page layout (left → right):
   //   0:                            printer-selector
-  //   1 .. kMaxAmsUnits:            AMS unit pages (only present units enabled)
+  //   1 .. kMaxAmsPageSlots:        AMS unit pages (right bank, then left bank;
+  //                                 only present units enabled)
   //   kPageIdxMain:                 main dashboard
   //   kPageIdxPreview:              print preview
   //   kPageIdxCamera:               camera feed
   static constexpr int kPageIdxPrinterSelect = 0;
+  static constexpr int kMaxAmsPageSlots = kMaxAmsUnits * 2;
   static constexpr int kPageIdxAmsFirst = 1;
-  static constexpr int kPageIdxAmsLast = kPageIdxAmsFirst + kMaxAmsUnits - 1;
+  static constexpr int kPageIdxAmsLast = kPageIdxAmsFirst + kMaxAmsPageSlots - 1;
   static constexpr int kPageIdxMain = kPageIdxAmsLast + 1;
   static constexpr int kPageIdxPreview = kPageIdxMain + 1;
   static constexpr int kPageIdxCamera = kPageIdxMain + 2;
@@ -123,11 +125,11 @@ class Ui {
   void compute_portal_texts_locked();
   void set_brightness_percent(int brightness_percent);
   void stop_ring_animations_locked();
-  // Build a single AMS-unit page (widgets attached to ams_pages_[unit_idx]).
-  // unit_idx 0 also receives the external-spool widgets.
-  void build_ams_page(int unit_idx);
-  // Apply AMS rendering for a single unit. Called once per visible unit.
-  void render_ams_unit(int unit_idx, const PrinterSnapshot& snapshot,
+  // Build a single AMS-unit page (widgets attached to ams_pages_[page_slot]).
+  // page_slot 0 additionally receives the right-side external-spool widgets.
+  void build_ams_page(int page_slot);
+  // Apply AMS rendering for a single page slot. Called once per visible unit.
+  void render_ams_unit(int page_slot, const PrinterSnapshot& snapshot,
                       bool show_unit_label);
   // Compute per-tray HMS error flags from snapshot.hms_codes.
   // Sets ams_tray_error_[unit][slot] for AMS-class HMS codes.
@@ -174,28 +176,25 @@ class Ui {
   void apply_page0_parallax(bool force = false);
   static void printer_card_click_cb(lv_event_t* event);
 
-  // --- AMS pages (page indices 1..kMaxAmsUnits) ---
-  // One page per AMS unit. ams_pages_[0] additionally hosts the external-spool
-  // widgets (which dynamically shrink the AMS visualization). Pages 1..3 do not
-  // host the external spool.
-  lv_obj_t* ams_pages_[kMaxAmsUnits] = {};
-  lv_obj_t* ams_unit_label_[kMaxAmsUnits] = {};   // "AMS 1/2/3/4" header (only when count>1)
-  lv_obj_t* ams_tray_row_[kMaxAmsUnits] = {};
-  lv_obj_t* ams_tray_col_[kMaxAmsUnits][kMaxAmsTrays] = {};
-  lv_obj_t* ams_tray_rect_[kMaxAmsUnits][kMaxAmsTrays] = {};
-  lv_obj_t* ams_tray_fill_[kMaxAmsUnits][kMaxAmsTrays] = {};   // dark overlay for empty portion
-  lv_obj_t* ams_tray_pct_[kMaxAmsUnits][kMaxAmsTrays] = {};    // percentage label inside rect
-  lv_obj_t* ams_tray_type_[kMaxAmsUnits][kMaxAmsTrays] = {};
-  lv_obj_t* ams_tray_arrow_[kMaxAmsUnits][kMaxAmsTrays] = {};  // triangle indicator below pill
-  lv_obj_t* ams_shelf_[kMaxAmsUnits] = {};                     // gray shelf behind upper pills
-  lv_obj_t* ams_base_[kMaxAmsUnits] = {};                      // dark base behind lower pills
-  lv_obj_t* ams_humidity_drop_[kMaxAmsUnits] = {};
-  lv_obj_t* ams_humidity_label_[kMaxAmsUnits] = {};
-  lv_obj_t* ams_temp_label_[kMaxAmsUnits] = {};
-  lv_obj_t* ams_note_[kMaxAmsUnits] = {};
+  // --- AMS pages (right AMS pages followed by left AMS pages) ---
+  lv_obj_t* ams_pages_[kMaxAmsPageSlots] = {};
+  lv_obj_t* ams_unit_label_[kMaxAmsPageSlots] = {};
+  lv_obj_t* ams_tray_row_[kMaxAmsPageSlots] = {};
+  lv_obj_t* ams_tray_col_[kMaxAmsPageSlots][kMaxAmsTrays] = {};
+  lv_obj_t* ams_tray_rect_[kMaxAmsPageSlots][kMaxAmsTrays] = {};
+  lv_obj_t* ams_tray_fill_[kMaxAmsPageSlots][kMaxAmsTrays] = {};   // dark overlay for empty portion
+  lv_obj_t* ams_tray_pct_[kMaxAmsPageSlots][kMaxAmsTrays] = {};    // percentage label inside rect
+  lv_obj_t* ams_tray_type_[kMaxAmsPageSlots][kMaxAmsTrays] = {};
+  lv_obj_t* ams_tray_arrow_[kMaxAmsPageSlots][kMaxAmsTrays] = {};  // triangle indicator below pill
+  lv_obj_t* ams_shelf_[kMaxAmsPageSlots] = {};                     // gray shelf behind upper pills
+  lv_obj_t* ams_base_[kMaxAmsPageSlots] = {};                      // dark base behind lower pills
+  lv_obj_t* ams_humidity_drop_[kMaxAmsPageSlots] = {};
+  lv_obj_t* ams_humidity_label_[kMaxAmsPageSlots] = {};
+  lv_obj_t* ams_temp_label_[kMaxAmsPageSlots] = {};
+  lv_obj_t* ams_note_[kMaxAmsPageSlots] = {};
   // Per-tray HMS/Error indicator state (true → pill gets diamond overlay,
   // arrow shows pulsating red triangle).
-  bool ams_tray_error_[kMaxAmsUnits][kMaxAmsTrays] = {};
+  bool ams_tray_error_[kMaxAmsPageSlots][kMaxAmsTrays] = {};
   // External spool widgets (only on ams_pages_[0]).
   lv_obj_t* ams_ext_col_ = nullptr;
   lv_obj_t* ams_ext_rect_ = nullptr;
@@ -204,7 +203,7 @@ class Ui {
   lv_obj_t* ams_ext_arrow_ = nullptr;
   bool ams_ext_spool_shown_ = false;
   // Per-page availability (true if this AMS unit is present on the printer).
-  bool ams_unit_present_[kMaxAmsUnits] = {};
+  bool ams_unit_present_[kMaxAmsPageSlots] = {};
   // Pulse animation state for error indicators (single shared timer).
   lv_timer_t* ams_error_pulse_timer_ = nullptr;
   uint32_t ams_error_pulse_phase_ = 0;

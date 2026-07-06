@@ -89,6 +89,8 @@ struct AmsTrayInfo {
 
 struct AmsUnitInfo {
   bool present = false;
+  bool single_tray = false;    // AMS-HT / other one-spool unit
+  int raw_id = -1;             // raw printer unit id (AMS-HT commonly uses 128+)
   int humidity_pct = -1;       // 0-100% relative humidity, -1 = unknown
   float temperature_c = 0.0f;
   std::array<AmsTrayInfo, kMaxAmsTrays> trays{};
@@ -186,8 +188,11 @@ struct PrinterSnapshot {
   int hw_switch_state = -1;
   int tray_now = -1;
   int tray_tar = -1;
+  int left_tray_now = -1;
+  int left_tray_tar = -1;
   int ams_status_main = -1;
   std::shared_ptr<AmsSnapshot> ams;
+  std::shared_ptr<AmsSnapshot> left_ams;
 };
 
 class PrinterStateStore {

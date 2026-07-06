@@ -598,35 +598,40 @@ uint32_t ams_ui_signature(const PrinterSnapshot& snapshot) {
   uint32_t hash = 2166136261U;
   hash = hash_mix(hash, snapshot.tray_now < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(snapshot.tray_now));
   hash = hash_mix(hash, snapshot.tray_tar < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(snapshot.tray_tar));
-  if (!snapshot.ams) {
-    return hash_mix(hash, 0);
-  }
+  hash = hash_mix(hash, snapshot.left_tray_now < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(snapshot.left_tray_now));
+  hash = hash_mix(hash, snapshot.left_tray_tar < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(snapshot.left_tray_tar));
 
-  hash = hash_mix(hash, snapshot.ams->count);
-  if (snapshot.ams->count == 0) {
-    return hash;
-  }
-
-  for (uint8_t u = 0; u < snapshot.ams->count && u < kMaxAmsUnits; ++u) {
-    const AmsUnitInfo& unit = snapshot.ams->units[u];
-    hash = hash_mix(hash, unit.humidity_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(unit.humidity_pct));
-    hash = hash_mix(hash, static_cast<uint32_t>(std::lround(unit.temperature_c * 10.0f)));
-    for (int i = 0; i < kMaxAmsTrays; ++i) {
-      const AmsTrayInfo& tray = unit.trays[i];
-      hash = hash_mix(hash, tray.present ? 1U : 0U);
-      hash = hash_mix(hash, tray.active ? 1U : 0U);
-      hash = hash_mix(hash, tray.color_rgba);
-      hash = hash_mix(hash, tray.remain_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(tray.remain_pct));
-      hash = hash_string(hash, tray.material_type);
+  auto fold_ams = [&](const std::shared_ptr<AmsSnapshot>& ams) {
+    if (!ams) {
+      hash = hash_mix(hash, 0);
+      return;
     }
-  }
+    hash = hash_mix(hash, ams->count);
+    for (uint8_t u = 0; u < ams->count && u < kMaxAmsUnits; ++u) {
+      const AmsUnitInfo& unit = ams->units[u];
+      hash = hash_mix(hash, unit.single_tray ? 1U : 0U);
+      hash = hash_mix(hash, unit.raw_id < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(unit.raw_id));
+      hash = hash_mix(hash, unit.humidity_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(unit.humidity_pct));
+      hash = hash_mix(hash, static_cast<uint32_t>(std::lround(unit.temperature_c * 10.0f)));
+      for (int i = 0; i < kMaxAmsTrays; ++i) {
+        const AmsTrayInfo& tray = unit.trays[i];
+        hash = hash_mix(hash, tray.present ? 1U : 0U);
+        hash = hash_mix(hash, tray.active ? 1U : 0U);
+        hash = hash_mix(hash, tray.color_rgba);
+        hash = hash_mix(hash, tray.remain_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(tray.remain_pct));
+        hash = hash_string(hash, tray.material_type);
+      }
+    }
 
-  const AmsTrayInfo& ext = snapshot.ams->external_spool;
-  hash = hash_mix(hash, ext.present ? 1U : 0U);
-  hash = hash_mix(hash, ext.active ? 1U : 0U);
-  hash = hash_mix(hash, ext.color_rgba);
-  hash = hash_mix(hash, ext.remain_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(ext.remain_pct));
-  hash = hash_string(hash, ext.material_type);
+    const AmsTrayInfo& ext = ams->external_spool;
+    hash = hash_mix(hash, ext.present ? 1U : 0U);
+    hash = hash_mix(hash, ext.active ? 1U : 0U);
+    hash = hash_mix(hash, ext.color_rgba);
+    hash = hash_mix(hash, ext.remain_pct < 0 ? 0xFFFFFFFFU : static_cast<uint32_t>(ext.remain_pct));
+    hash = hash_string(hash, ext.material_type);
+  };
+  fold_ams(snapshot.ams);
+  fold_ams(snapshot.left_ams);
 
   // Fold HMS codes (subset relevant to AMS) into the signature so the error
   // overlay updates when codes appear/disappear.
@@ -2054,24 +2059,31 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   // --- AMS page rendering ---
   LvglLockGuard::note_phase("ams");
   const uint8_t ams_count = snapshot.ams ? snapshot.ams->count : 0;
+  const uint8_t left_ams_count = snapshot.left_ams ? snapshot.left_ams->count : 0;
   const uint32_t ams_signature = ams_ui_signature(snapshot);
   const bool ams_visible = scrolling_ ||
       (active_page_ >= kPageIdxAmsFirst && active_page_ <= kPageIdxAmsLast);
   const bool render_ams =
       ams_visible && ams_signature != last_rendered_ams_signature_;
-  if (ams_count > 0 && render_ams) {
+  if ((ams_count > 0 || left_ams_count > 0) && render_ams) {
     last_rendered_ams_signature_ = ams_signature;
     compute_ams_tray_errors(snapshot);
-    const bool show_unit_labels = ams_count > 1;
-    for (int u = 0; u < kMaxAmsUnits; ++u) {
-      if (u < ams_count) {
-        render_ams_unit(u, snapshot, show_unit_labels);
+      const bool show_unit_labels = ams_count > 1 || left_ams_count > 0;
+      for (int u = 0; u < kMaxAmsUnits; ++u) {
+        if (u < ams_count) {
+          render_ams_unit(u, snapshot, show_unit_labels);
+        }
+      }
+      const bool show_left_unit_labels = left_ams_count > 1 || ams_count > 0;
+      for (int u = 0; u < kMaxAmsUnits; ++u) {
+        if (u < left_ams_count) {
+          render_ams_unit(kMaxAmsUnits + u, snapshot, show_left_unit_labels);
       }
     }
   } else if (render_ams) {
     last_rendered_ams_signature_ = ams_signature;
     // No AMS — show "No AMS connected" note on the first AMS page only.
-    for (int u = 0; u < kMaxAmsUnits; ++u) {
+    for (int u = 0; u < kMaxAmsPageSlots; ++u) {
       if (ams_tray_row_[u] != nullptr) {
         set_hidden(ams_tray_row_[u], true);
       }
@@ -2301,14 +2313,17 @@ void Ui::pulse_anim_exec_cb(void* var, int32_t scale) {
 // --- Multi-AMS helpers --------------------------------------------------------
 
 void Ui::build_ams_page(int unit_idx) {
-  if (unit_idx < 0 || unit_idx >= kMaxAmsUnits) return;
+  if (unit_idx < 0 || unit_idx >= kMaxAmsPageSlots) return;
+  const bool left_bank = unit_idx >= kMaxAmsUnits;
+  const int display_unit_idx = unit_idx % kMaxAmsUnits;
   lv_obj_t* page = ams_pages_[unit_idx];
   if (page == nullptr) return;
 
   // Unit header label ("AMS 1..4") — created always, hidden by default.
   ams_unit_label_[unit_idx] = lv_label_create(page);
   char unit_label_buf[16];
-  std::snprintf(unit_label_buf, sizeof(unit_label_buf), "AMS %d", unit_idx + 1);
+  std::snprintf(unit_label_buf, sizeof(unit_label_buf), "%c AMS %d",
+                left_bank ? 'L' : 'R', display_unit_idx + 1);
   set_label_text_if_changed(ams_unit_label_[unit_idx], unit_label_buf);
   lv_obj_set_style_text_font(ams_unit_label_[unit_idx], &dosis_32, 0);
   lv_obj_set_style_text_color(ams_unit_label_[unit_idx], lv_color_hex(0xFFFFFF), 0);
@@ -2534,7 +2549,7 @@ void Ui::build_ams_page(int unit_idx) {
 }
 
 void Ui::compute_ams_tray_errors(const PrinterSnapshot& snapshot) {
-  for (int u = 0; u < kMaxAmsUnits; ++u) {
+  for (int u = 0; u < kMaxAmsPageSlots; ++u) {
     for (int s = 0; s < kMaxAmsTrays; ++s) {
       ams_tray_error_[u][s] = false;
     }
@@ -2544,8 +2559,8 @@ void Ui::compute_ams_tray_errors(const PrinterSnapshot& snapshot) {
     const uint8_t module_id = (attr >> 24) & 0xFFU;
     if (module_id != 0x07U) continue;  // not an AMS-class HMS code
     const uint8_t module_num = (attr >> 16) & 0xFFU;
-    int unit_idx = (module_num >= 128) ? (module_num - 128) : module_num;
-    if (unit_idx < 0 || unit_idx >= kMaxAmsUnits) continue;
+    int unit_idx = (module_num >= 128) ? (kMaxAmsUnits + module_num - 128) : module_num;
+    if (unit_idx < 0 || unit_idx >= kMaxAmsPageSlots) continue;
     const uint8_t part_id = (attr >> 8) & 0xFFU;
     // Slot mapping (BambuStudio convention): part_id values 0x20..0x23 map to
     // slots 0..3. Other part_id values describe unit-level errors and are
@@ -2578,7 +2593,7 @@ void Ui::ams_error_pulse_timer_cb(lv_timer_t* timer) {
       (static_cast<uint32_t>(r) << 16) |
       (static_cast<uint32_t>(g) << 8) |
       static_cast<uint32_t>(b));
-  for (int u = 0; u < kMaxAmsUnits; ++u) {
+  for (int u = 0; u < kMaxAmsPageSlots; ++u) {
     for (int s = 0; s < kMaxAmsTrays; ++s) {
       if (!ui->ams_tray_error_[u][s]) continue;
       lv_obj_t* arrow = ui->ams_tray_arrow_[u][s];
@@ -2591,7 +2606,7 @@ void Ui::ams_error_pulse_timer_cb(lv_timer_t* timer) {
 
 void Ui::apply_ams_error_pulse_locked() {
   bool any_error = false;
-  for (int u = 0; u < kMaxAmsUnits && !any_error; ++u) {
+  for (int u = 0; u < kMaxAmsPageSlots && !any_error; ++u) {
     for (int s = 0; s < kMaxAmsTrays && !any_error; ++s) {
       if (ams_tray_error_[u][s]) any_error = true;
     }
@@ -2601,7 +2616,7 @@ void Ui::apply_ams_error_pulse_locked() {
   // flag value. Arrow color/opacity is owned by render_ams_unit() (non-error)
   // and the pulse timer (error) — we must not override it here, otherwise we
   // would clobber the green "active" indicator on non-error slots.
-  for (int u = 0; u < kMaxAmsUnits; ++u) {
+  for (int u = 0; u < kMaxAmsPageSlots; ++u) {
     for (int s = 0; s < kMaxAmsTrays; ++s) {
       if (ams_tray_rect_[u][s] != nullptr) {
         lv_obj_invalidate(ams_tray_rect_[u][s]);
@@ -2619,9 +2634,12 @@ void Ui::apply_ams_error_pulse_locked() {
 }
 
 void Ui::render_ams_unit(int unit_idx, const PrinterSnapshot& snapshot, bool show_unit_label) {
-  if (unit_idx < 0 || unit_idx >= kMaxAmsUnits) return;
-  if (snapshot.ams == nullptr) return;
-  const AmsUnitInfo& unit = snapshot.ams->units[unit_idx];
+  if (unit_idx < 0 || unit_idx >= kMaxAmsPageSlots) return;
+  const bool left_bank = unit_idx >= kMaxAmsUnits;
+  const int source_unit_idx = unit_idx % kMaxAmsUnits;
+  const std::shared_ptr<AmsSnapshot>& ams_snapshot = left_bank ? snapshot.left_ams : snapshot.ams;
+  if (ams_snapshot == nullptr) return;
+  const AmsUnitInfo& unit = ams_snapshot->units[source_unit_idx];
 
   // Unit header label
   if (ams_unit_label_[unit_idx] != nullptr) {
@@ -2629,10 +2647,11 @@ void Ui::render_ams_unit(int unit_idx, const PrinterSnapshot& snapshot, bool sho
   }
 
   const bool ext_spool_active =
-      unit_idx == 0 && (snapshot.tray_now == 254 || snapshot.tray_tar == 254);
+      !left_bank && unit_idx == 0 && (snapshot.tray_now == 254 || snapshot.tray_tar == 254);
+  const bool single_tray_unit = unit.single_tray;
 
   // Dynamic ext-spool layout shrink — only on AMS page 0.
-  if (unit_idx == 0 && ext_spool_active != ams_ext_spool_shown_) {
+  if (!single_tray_unit && unit_idx == 0 && ext_spool_active != ams_ext_spool_shown_) {
     ams_ext_spool_shown_ = ext_spool_active;
     if (ext_spool_active) {
       for (int i = 0; i < kMaxAmsTrays; ++i) {
@@ -2668,9 +2687,45 @@ void Ui::render_ams_unit(int unit_idx, const PrinterSnapshot& snapshot, bool sho
     }
   }
 
+  if (single_tray_unit) {
+    if (unit_idx == 0 && ams_ext_spool_shown_) {
+      ams_ext_spool_shown_ = false;
+      lv_obj_add_flag(ams_ext_col_, LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int i = 0; i < kMaxAmsTrays; ++i) {
+      set_hidden(ams_tray_col_[unit_idx][i], i != 0);
+    }
+    lv_obj_set_size(ams_tray_col_[unit_idx][0], 76, LV_SIZE_CONTENT);
+    lv_obj_set_size(ams_tray_rect_[unit_idx][0], 72, 140);
+    lv_obj_set_style_radius(ams_tray_rect_[unit_idx][0], 40, 0);
+    lv_obj_set_width(ams_tray_type_[unit_idx][0], 68);
+    lv_obj_set_size(ams_tray_fill_[unit_idx][0], 72, 0);
+    lv_obj_set_size(ams_shelf_[unit_idx], 118, 110);
+    lv_obj_align(ams_shelf_[unit_idx], LV_ALIGN_CENTER, 0, -50);
+    lv_obj_set_size(ams_base_[unit_idx], 140, 103);
+    lv_obj_align(ams_base_[unit_idx], LV_ALIGN_CENTER, 0, 35);
+    lv_obj_set_size(ams_tray_row_[unit_idx], 120, LV_SIZE_CONTENT);
+    lv_obj_align(ams_tray_row_[unit_idx], LV_ALIGN_CENTER, 0, -13);
+  } else if (!(unit_idx == 0 && ext_spool_active)) {
+    for (int i = 0; i < kMaxAmsTrays; ++i) {
+      set_hidden(ams_tray_col_[unit_idx][i], false);
+      lv_obj_set_size(ams_tray_col_[unit_idx][i], 76, LV_SIZE_CONTENT);
+      lv_obj_set_size(ams_tray_rect_[unit_idx][i], 72, 140);
+      lv_obj_set_style_radius(ams_tray_rect_[unit_idx][i], 40, 0);
+      lv_obj_set_width(ams_tray_type_[unit_idx][i], 68);
+      lv_obj_set_size(ams_tray_fill_[unit_idx][i], 72, 0);
+    }
+    lv_obj_set_size(ams_shelf_[unit_idx], 359, 110);
+    lv_obj_align(ams_shelf_[unit_idx], LV_ALIGN_CENTER, 0, -50);
+    lv_obj_set_size(ams_base_[unit_idx], 385, 103);
+    lv_obj_align(ams_base_[unit_idx], LV_ALIGN_CENTER, 0, 35);
+    lv_obj_set_size(ams_tray_row_[unit_idx], 420, LV_SIZE_CONTENT);
+    lv_obj_align(ams_tray_row_[unit_idx], LV_ALIGN_CENTER, 0, -13);
+  }
+
   // External spool styling (only on unit 0 when active).
-  if (unit_idx == 0 && ext_spool_active) {
-    const AmsTrayInfo& ext = snapshot.ams->external_spool;
+  if (!single_tray_unit && unit_idx == 0 && ext_spool_active) {
+    const AmsTrayInfo& ext = ams_snapshot->external_spool;
     if (ext.color_rgba != 0) {
       const uint32_t ext_rgb = (ext.color_rgba >> 8) & 0x00FFFFFF;
       lv_obj_set_style_bg_color(ams_ext_rect_, lv_color_hex(ext_rgb), 0);
@@ -2697,6 +2752,11 @@ void Ui::render_ams_unit(int unit_idx, const PrinterSnapshot& snapshot, bool sho
   const int pill_h = (unit_idx == 0 && ext_spool_active) ? 108 : 140;
 
   for (int i = 0; i < kMaxAmsTrays; ++i) {
+    if (single_tray_unit && i != 0) {
+      set_hidden(ams_tray_pct_[unit_idx][i], true);
+      set_hidden(ams_tray_arrow_[unit_idx][i], true);
+      continue;
+    }
     const AmsTrayInfo& tray = unit.trays[i];
     lv_obj_t* rect = ams_tray_rect_[unit_idx][i];
     lv_obj_t* arrow = ams_tray_arrow_[unit_idx][i];
@@ -2823,7 +2883,7 @@ esp_err_t Ui::build_dashboard() {
   };
 
   page0_ = create_page(pager_);
-  for (int u = 0; u < kMaxAmsUnits; ++u) {
+  for (int u = 0; u < kMaxAmsPageSlots; ++u) {
     ams_pages_[u] = create_page(pager_);
     enable_touch_bubble(ams_pages_[u]);
   }
@@ -2866,11 +2926,11 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_align(page0_empty_note_, LV_ALIGN_CENTER, 0, 20);
   lv_obj_add_flag(page0_empty_note_, LV_OBJ_FLAG_HIDDEN);
 
-  // --- AMS pages (one per AMS unit, indices kPageIdxAmsFirst..kPageIdxAmsLast) ---
-  // Build all kMaxAmsUnits AMS pages up front; each page is hidden until the
-  // backend reports a corresponding unit. The first AMS page additionally hosts
-  // the external-spool widgets (which dynamically shrink that page's pills).
-  for (int u = 0; u < kMaxAmsUnits; ++u) {
+  // --- AMS pages (right AMS units, then left AMS units) ---
+  // Build all page slots up front; each page is hidden until the backend reports
+  // a corresponding unit. The first right AMS page additionally hosts the
+  // external-spool widgets (which dynamically shrink that page's pills).
+  for (int u = 0; u < kMaxAmsPageSlots; ++u) {
     build_ams_page(u);
     lv_obj_add_flag(ams_pages_[u], LV_OBJ_FLAG_HIDDEN);
     ams_unit_present_[u] = false;
@@ -3307,7 +3367,7 @@ void Ui::apply_page_visibility() {
       settled_page1 && !portal_hint_text_.empty() &&
       (portal_hint_has_priority || !detail_visible_);
 
-  for (int u = 0; u < kMaxAmsUnits; ++u) {
+  for (int u = 0; u < kMaxAmsPageSlots; ++u) {
     if (ams_pages_[u] != nullptr) {
       set_hidden(ams_pages_[u], !ams_unit_present_[u]);
     }
@@ -3354,9 +3414,12 @@ void Ui::update_page_availability_locked(const PrinterSnapshot& snapshot) {
   const bool preview_available = snapshot.preview_page_available;
   const bool camera_available = snapshot.camera_page_available;
   const uint8_t ams_count = snapshot.ams ? snapshot.ams->count : 0;
+  const uint8_t left_ams_count = snapshot.left_ams ? snapshot.left_ams->count : 0;
   bool ams_changed = false;
-  for (int u = 0; u < kMaxAmsUnits; ++u) {
-    const bool present = u < ams_count;
+  for (int u = 0; u < kMaxAmsPageSlots; ++u) {
+    const bool left_bank = u >= kMaxAmsUnits;
+    const int unit_idx = u % kMaxAmsUnits;
+    const bool present = left_bank ? (unit_idx < left_ams_count) : (unit_idx < ams_count);
     if (ams_unit_present_[u] != present) {
       ams_unit_present_[u] = present;
       ams_changed = true;
@@ -3373,7 +3436,7 @@ void Ui::update_page_availability_locked(const PrinterSnapshot& snapshot) {
     return;
   }
 
-  for (int u = 0; u < kMaxAmsUnits; ++u) {
+  for (int u = 0; u < kMaxAmsPageSlots; ++u) {
     if (ams_pages_[u] != nullptr) {
       set_hidden(ams_pages_[u], !ams_unit_present_[u]);
     }

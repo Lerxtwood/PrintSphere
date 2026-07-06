@@ -79,8 +79,11 @@ struct BambuCloudSnapshot {
   int hw_switch_state = -1;
   int tray_now = -1;
   int tray_tar = -1;
+  int left_tray_now = -1;
+  int left_tray_tar = -1;
   int ams_status_main = -1;
   std::shared_ptr<AmsSnapshot> ams;
+  std::shared_ptr<AmsSnapshot> left_ams;
   std::vector<uint64_t> hms_codes;
   uint16_t hms_alert_count = 0;
   uint64_t live_data_last_update_ms = 0;
@@ -134,8 +137,11 @@ class BambuCloudClient {
     int hw_switch_state = -1;
     int tray_now = -1;
     int tray_tar = -1;
+    int left_tray_now = -1;
+    int left_tray_tar = -1;
     int ams_status_main = -1;
     std::shared_ptr<AmsSnapshot> ams;
+    std::shared_ptr<AmsSnapshot> left_ams;
     std::vector<uint64_t> hms_codes;
     uint16_t hms_alert_count = 0;
     bool has_error = false;

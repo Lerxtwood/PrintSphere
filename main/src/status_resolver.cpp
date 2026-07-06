@@ -317,7 +317,9 @@ StatusSourceAdapter make_local_source_adapter(const PrinterSnapshot& snapshot, b
       adapter.error_supported && adapter.fresh &&
       (snapshot.print_error_code != 0 || !snapshot.hms_codes.empty() ||
        snapshot.hms_alert_count > 0 || snapshot.non_error_stop || snapshot.has_error);
-  adapter.ams_usable = adapter.fresh && (snapshot.ams != nullptr) && snapshot.ams->count > 0;
+  adapter.ams_usable = adapter.fresh &&
+      (((snapshot.ams != nullptr) && snapshot.ams->count > 0) ||
+       ((snapshot.left_ams != nullptr) && snapshot.left_ams->count > 0));
   return adapter;
 }
 
@@ -353,7 +355,9 @@ StatusSourceAdapter make_cloud_source_adapter(const BambuCloudSnapshot& snapshot
       adapter.error_supported && adapter.fresh &&
       (snapshot.print_error_code != 0 || !snapshot.hms_codes.empty() ||
        snapshot.hms_alert_count > 0 || snapshot.has_error || snapshot.non_error_stop);
-  adapter.ams_usable = adapter.fresh && (snapshot.ams != nullptr) && snapshot.ams->count > 0;
+  adapter.ams_usable = adapter.fresh &&
+      (((snapshot.ams != nullptr) && snapshot.ams->count > 0) ||
+       ((snapshot.left_ams != nullptr) && snapshot.left_ams->count > 0));
   return adapter;
 }
 
@@ -1031,12 +1035,18 @@ PrinterSnapshot merge_status_sources(const PrinterSnapshot& local_snapshot, bool
     snapshot.hw_switch_state = local_snapshot.hw_switch_state;
     snapshot.tray_now = local_snapshot.tray_now;
     snapshot.tray_tar = local_snapshot.tray_tar;
+    snapshot.left_tray_now = local_snapshot.left_tray_now;
+    snapshot.left_tray_tar = local_snapshot.left_tray_tar;
     snapshot.ams = local_snapshot.ams;
+    snapshot.left_ams = local_snapshot.left_ams;
   } else if (cloud_source.ams_usable) {
     snapshot.hw_switch_state = cloud_snapshot.hw_switch_state;
     snapshot.tray_now = cloud_snapshot.tray_now;
     snapshot.tray_tar = cloud_snapshot.tray_tar;
+    snapshot.left_tray_now = cloud_snapshot.left_tray_now;
+    snapshot.left_tray_tar = cloud_snapshot.left_tray_tar;
     snapshot.ams = cloud_snapshot.ams;
+    snapshot.left_ams = cloud_snapshot.left_ams;
   }
 
   if (cloud_enabled && cloud_preview_available(cloud_snapshot, now_ms)) {

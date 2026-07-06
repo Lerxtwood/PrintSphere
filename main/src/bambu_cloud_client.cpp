@@ -1549,34 +1549,58 @@ NozzleTemperatureBundle extract_cloud_nozzle_temperature_bundle(const cJSON* ite
   return bundle;
 }
 
-// Extract tray_now override from device.extruder.info[].snow (V2 protocol).
-// See extract_extruder_snow_tray_now in printer_client.cpp for full documentation.
-int extract_extruder_snow_tray_now(const cJSON* source) {
-  const cJSON* device = child_object_local(source, "device");
-  if (device == nullptr) return -1;
-  const cJSON* extruder = child_object_local(device, "extruder");
-  if (extruder == nullptr) return -1;
-  const cJSON* info_array = cJSON_GetObjectItemCaseSensitive(extruder, "info");
-  if (!cJSON_IsArray(info_array)) return -1;
+  struct SnowTrayInfo {
+    bool present = false;
+    int ams_id = -1;
+    int slot_id = -1;
+    int mapped_tray = -1;
+  };
 
-  const cJSON* item = nullptr;
-  cJSON_ArrayForEach(item, info_array) {
-    const int id = json_int_local(item, "id", -1);
-    if (id != 0) continue;
-    const cJSON* snow_item = cJSON_GetObjectItemCaseSensitive(item, "snow");
-    if (snow_item == nullptr || !cJSON_IsNumber(snow_item)) return -1;
-
-    const int snow = snow_item->valueint;
-    const int ams_id = (snow >> 8) & 0xFF;
+  // Extract tray_now override from device.extruder.info[].snow (V2 protocol).
+  // See extract_extruder_snow_tray_now in printer_client.cpp for full documentation.
+  SnowTrayInfo extract_extruder_snow_tray_info(const cJSON* source, int extruder_id = 0) {
+    const cJSON* device = child_object_local(source, "device");
+    if (device == nullptr) return {};
+    const cJSON* extruder = child_object_local(device, "extruder");
+    if (extruder == nullptr) return {};
+    const cJSON* info_array = cJSON_GetObjectItemCaseSensitive(extruder, "info");
+    if (!cJSON_IsArray(info_array)) return {};
+  
+    const cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, info_array) {
+      const int id = json_int_local(item, "id", -1);
+      if (id != extruder_id) continue;
+      const cJSON* snow_item = cJSON_GetObjectItemCaseSensitive(item, "snow");
+      if (snow_item == nullptr || !cJSON_IsNumber(snow_item)) return {};
+  
+      const int snow = snow_item->valueint;
+      const int ams_id = (snow >> 8) & 0xFF;
     const int slot_id = snow & 0xFF;
-    ESP_LOGI(kTag, "[DIAG] cloud extruder snow: raw=%d ams_id=%d slot_id=%d", snow, ams_id, slot_id);
-
-    if (ams_id == 255) return 254;
-    if (ams_id >= 128) return ams_id;
-    return ams_id * 4 + slot_id;
+      ESP_LOGI(kTag, "[DIAG] cloud extruder snow[%d]: raw=%d ams_id=%d slot_id=%d",
+               extruder_id, snow, ams_id, slot_id);
+  
+      SnowTrayInfo info;
+      info.present = true;
+      info.ams_id = ams_id;
+      info.slot_id = slot_id;
+      if (ams_id == 255) {
+        info.mapped_tray = 254;
+      } else if (ams_id >= 128) {
+        info.mapped_tray = ams_id;
+      } else {
+        info.mapped_tray = ams_id * 4 + slot_id;
+      }
+      return info;
+    }
+    return {};
   }
-  return -1;
-}
+
+  int first_free_ams_unit_slot(const bool claimed[kMaxAmsUnits]) {
+    for (int i = 0; i < kMaxAmsUnits; ++i) {
+      if (!claimed[i]) return i;
+    }
+    return -1;
+  }
 
 TemperatureSample extract_cloud_bed_temperature_c(const cJSON* item, float fallback) {
   TemperatureSample sample{fallback, false};
@@ -2064,7 +2088,10 @@ void BambuCloudClient::apply_cloud_session_state(bool configured, bool connected
     live.hw_switch_state = -1;
     live.tray_now = -1;
     live.tray_tar = -1;
+    live.left_tray_now = -1;
+    live.left_tray_tar = -1;
     live.ams.reset();
+    live.left_ams.reset();
     live.hms_codes.clear();
     live.hms_alert_count = 0;
     live.has_error = false;
@@ -2162,14 +2189,20 @@ void BambuCloudClient::publish_combined_snapshot() {
     current.hw_switch_state = live.hw_switch_state;
     current.tray_now = live.tray_now;
     current.tray_tar = live.tray_tar;
+    current.left_tray_now = live.left_tray_now;
+    current.left_tray_tar = live.left_tray_tar;
     current.ams_status_main = live.ams_status_main;
     current.ams = live.ams;
+    current.left_ams = live.left_ams;
   } else {
     current.hw_switch_state = -1;
     current.tray_now = -1;
     current.tray_tar = -1;
+    current.left_tray_now = -1;
+    current.left_tray_tar = -1;
     current.ams_status_main = -1;
     current.ams.reset();
+    current.left_ams.reset();
   }
   if (live_has_recent_state &&
       (live.live_data_last_update_ms != 0 || live.progress_percent > 0.0f ||
@@ -3008,36 +3041,85 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
       runtime.tray_tar = json_int(ams_obj, "tray_tar", runtime.tray_tar);
 
       // V2 protocol override: P2S/H2 series send device.extruder.info[].snow.
-      const int snow_tray = extract_extruder_snow_tray_now(print);
-      if (snow_tray >= 0 && snow_tray != runtime.tray_now) {
-        ESP_LOGI(kTag, "cloud tray_now override from snow: ams.tray_now=%d -> snow=%d",
-                 runtime.tray_now, snow_tray);
-        runtime.tray_now = snow_tray;
-      }
+        const SnowTrayInfo right_snow = extract_extruder_snow_tray_info(print);
+        if (right_snow.mapped_tray >= 0 && right_snow.mapped_tray != runtime.tray_now) {
+          ESP_LOGI(kTag, "cloud tray_now override from snow: ams.tray_now=%d -> snow=%d",
+                   runtime.tray_now, right_snow.mapped_tray);
+          runtime.tray_now = right_snow.mapped_tray;
+        }
+        const SnowTrayInfo left_snow = extract_extruder_snow_tray_info(print, 1);
+        if (left_snow.mapped_tray >= 0 && left_snow.mapped_tray != runtime.left_tray_now) {
+          ESP_LOGI(kTag, "cloud left tray_now from snow: %d->%d",
+                   runtime.left_tray_now, left_snow.mapped_tray);
+          runtime.left_tray_now = left_snow.mapped_tray;
+        }
 
       const cJSON* ams_array = cJSON_GetObjectItemCaseSensitive(ams_obj, "ams");
       if (cJSON_IsArray(ams_array)) {
-        if (!runtime.ams) {
-          runtime.ams = std::make_shared<AmsSnapshot>();
-        }
-
-        uint8_t unit_count = runtime.ams->count;
-        const cJSON* ams_unit = nullptr;
-        int ams_unit_index = 0;
-        cJSON_ArrayForEach(ams_unit, ams_array) {
-          int unit_id = json_int(ams_unit, "id", -1);
-          if (unit_id < 0) {
-            unit_id = ams_unit_index;
+          auto parsed_ams = std::make_shared<AmsSnapshot>();
+          auto parsed_left_ams = std::make_shared<AmsSnapshot>();
+  
+            uint8_t unit_count = 0;
+            uint8_t left_unit_count = 0;
+          bool right_unit_claimed[kMaxAmsUnits] = {};
+          bool left_unit_claimed[kMaxAmsUnits] = {};
+          const cJSON* reserve_unit = nullptr;
+          int reserve_unit_index = 0;
+          cJSON_ArrayForEach(reserve_unit, ams_array) {
+            int reserve_raw_id = json_int(reserve_unit, "id", -1);
+            if (reserve_raw_id < 0) {
+              reserve_raw_id = reserve_unit_index;
+            }
+            ++reserve_unit_index;
+            if (reserve_raw_id >= 0 && reserve_raw_id < kMaxAmsUnits) {
+              right_unit_claimed[reserve_raw_id] = true;
+            }
           }
-          ++ams_unit_index;
-          if (unit_id < 0 || unit_id >= kMaxAmsUnits) {
-            continue;
-          }
-
-          AmsUnitInfo& unit = runtime.ams->units[unit_id];
-          unit.present = true;
-          if ((unit_id + 1) > unit_count) {
+          const cJSON* ams_unit = nullptr;
+          int ams_unit_index = 0;
+          cJSON_ArrayForEach(ams_unit, ams_array) {
+          int raw_unit_id = json_int(ams_unit, "id", -1);
+            if (raw_unit_id < 0) {
+              raw_unit_id = ams_unit_index;
+            }
+            ++ams_unit_index;
+            const bool single_tray_unit = raw_unit_id >= 128;
+            bool left_bank = false;
+            int unit_id = -1;
+            if (single_tray_unit) {
+              if (left_snow.present && left_snow.ams_id == raw_unit_id) {
+                left_bank = true;
+              } else if (right_snow.present && right_snow.ams_id == raw_unit_id) {
+                left_bank = false;
+              } else {
+                left_bank = (first_free_ams_unit_slot(left_unit_claimed) >= 0 &&
+                             left_unit_count == 0);
+              }
+              unit_id = first_free_ams_unit_slot(left_bank ? left_unit_claimed
+                                                          : right_unit_claimed);
+            } else {
+              left_bank = false;
+              unit_id = raw_unit_id;
+            }
+            if (unit_id < 0 || unit_id >= kMaxAmsUnits) {
+              continue;
+            }
+            if (left_bank) {
+              left_unit_claimed[unit_id] = true;
+            } else {
+              right_unit_claimed[unit_id] = true;
+            }
+  
+              std::shared_ptr<AmsSnapshot>& target_ams = left_bank ? parsed_left_ams : parsed_ams;
+              AmsUnitInfo& unit = target_ams->units[unit_id];
+            unit.present = true;
+            unit.single_tray = single_tray_unit;
+            unit.raw_id = raw_unit_id;
+          if (!left_bank && (unit_id + 1) > unit_count) {
             unit_count = static_cast<uint8_t>(unit_id + 1);
+          }
+          if (left_bank && (unit_id + 1) > left_unit_count) {
+            left_unit_count = static_cast<uint8_t>(unit_id + 1);
           }
 
           const int humidity_raw = json_int(ams_unit, "humidity_raw", -1);
@@ -3065,13 +3147,16 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
           int tray_index = 0;
           cJSON_ArrayForEach(tray_obj, tray_array) {
             int tray_id = json_int(tray_obj, "id", -1);
-            if (tray_id < 0) {
-              tray_id = tray_index;
-            }
-            ++tray_index;
-            if (tray_id < 0 || tray_id >= kMaxAmsTrays) {
-              continue;
-            }
+              if (tray_id < 0) {
+                tray_id = tray_index;
+              }
+              ++tray_index;
+              if (single_tray_unit && tray_id >= 0) {
+                tray_id = 0;
+              }
+              if (tray_id < 0 || tray_id >= kMaxAmsTrays) {
+                continue;
+              }
 
             AmsTrayInfo& tray = unit.trays[tray_id];
             const int field_count = cJSON_GetArraySize(tray_obj);
@@ -3115,19 +3200,38 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
           }
         }
 
-        runtime.ams->count = unit_count;
-      }
-
-      if (runtime.ams) {
-        for (uint8_t unit_id = 0; unit_id < runtime.ams->count && unit_id < kMaxAmsUnits; ++unit_id) {
-          AmsUnitInfo& unit = runtime.ams->units[unit_id];
-          for (int tray_id = 0; tray_id < kMaxAmsTrays; ++tray_id) {
-            AmsTrayInfo& tray = unit.trays[tray_id];
-            const int global_tray_idx = unit_id * kMaxAmsTrays + tray_id;
-            tray.active = tray.present && runtime.tray_now == global_tray_idx;
+          parsed_ams->count = unit_count;
+          parsed_left_ams->count = left_unit_count;
+          runtime.ams = parsed_ams;
+          if (left_unit_count > 0) {
+            runtime.left_ams = parsed_left_ams;
+          } else {
+            runtime.left_ams.reset();
           }
         }
-      }
+
+        if (runtime.ams) {
+          for (uint8_t unit_id = 0; unit_id < runtime.ams->count && unit_id < kMaxAmsUnits; ++unit_id) {
+            AmsUnitInfo& unit = runtime.ams->units[unit_id];
+            for (int tray_id = 0; tray_id < kMaxAmsTrays; ++tray_id) {
+              AmsTrayInfo& tray = unit.trays[tray_id];
+              const int global_tray_idx = unit_id * kMaxAmsTrays + tray_id;
+              const int active_key = unit.single_tray ? unit.raw_id : global_tray_idx;
+              tray.active = tray.present && runtime.tray_now == active_key;
+            }
+          }
+        }
+        if (runtime.left_ams) {
+          for (uint8_t unit_id = 0; unit_id < runtime.left_ams->count && unit_id < kMaxAmsUnits; ++unit_id) {
+            AmsUnitInfo& unit = runtime.left_ams->units[unit_id];
+            for (int tray_id = 0; tray_id < kMaxAmsTrays; ++tray_id) {
+              AmsTrayInfo& tray = unit.trays[tray_id];
+              const int global_tray_idx = unit_id * kMaxAmsTrays + tray_id;
+              const int active_key = unit.single_tray ? unit.raw_id : global_tray_idx;
+              tray.active = tray.present && runtime.left_tray_now == active_key;
+            }
+          }
+        }
     }
 
     // Parse vt_tray / vir_slot (external spool) from cloud MQTT.
