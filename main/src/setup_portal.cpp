@@ -41,7 +41,7 @@ constexpr uint64_t kPortalSessionLifetimeMs = 10ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalSessionExtendMs = 5ULL * 60ULL * 1000ULL;
 constexpr uint64_t kPortalProvisioningGraceMs = 5ULL * 60ULL * 1000ULL;
 constexpr char kPortalReleaseVersion[] = PRINTSPHERE_RELEASE_VERSION;
-constexpr char kCompanionPrintSphereManifestUrl[] = "https://api.github.com/repos/Lerxtwood/capsule-radar/releases/latest";
+constexpr char kCompanionPrintSphereManifestUrl[] = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/printsphere-manifest.json";
 constexpr char kCompanionPrintSphereOtaUrl[] = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/PrintSphere-ota.bin";
 constexpr esp_partition_subtype_t kPrintSphereOtaSubtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
 constexpr char kFaviconSvg[] =
@@ -121,6 +121,30 @@ std::string read_string_field(const cJSON* object, const char* key) {
     return {};
   }
   return item->valuestring;
+}
+
+std::string release_notes_json(const cJSON* object) {
+  const cJSON* notes = cJSON_GetObjectItemCaseSensitive(object, "releaseNotes");
+  if (!cJSON_IsArray(notes)) {
+    return "[]";
+  }
+  std::string body = "[";
+  bool first = true;
+  const cJSON* item = nullptr;
+  cJSON_ArrayForEach(item, notes) {
+    if (!cJSON_IsString(item) || item->valuestring == nullptr || item->valuestring[0] == '\0') {
+      continue;
+    }
+    if (!first) {
+      body += ",";
+    }
+    first = false;
+    body += "\"";
+    body += json_escape(item->valuestring);
+    body += "\"";
+  }
+  body += "]";
+  return body;
 }
 
 bool read_bool_field(const cJSON* object, const char* key, bool fallback) {
@@ -2368,7 +2392,8 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
     html += "<div class=\"hint-box\"><strong>Firmware installs:</strong> Use the Capsule Companion web installer to update or repair all firmware slots at once.</div>";
     html += "<div class=\"actions\"><button type=\"button\" class=\"secondary\" id=\"firmware-check-button\">Check for new firmware</button>";
     html += "<a class=\"button secondary\" href=\"https://lerxtwood.github.io/capsule-radar/\" target=\"_blank\" rel=\"noopener noreferrer\">Open web installer</a>";
-    html += "<div class=\"micro\" id=\"firmware-status\">Waiting.</div></div>";
+    html += "<div class=\"micro\" id=\"firmware-status\">Waiting.</div>";
+    html += "<div class=\"hint-box\" id=\"firmware-notes\" style=\"display:none;\"></div></div>";
     end_collapsible_section();
   }
 
@@ -3098,12 +3123,17 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += "(function(){";
   html += "var fwBtn=document.getElementById('firmware-check-button');";
   html += "var fwStatus=document.getElementById('firmware-status');";
+  html += "var fwNotes=document.getElementById('firmware-notes');";
+  html += "function escHtml(s){return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}";
+  html += "function showFwNotes(notes){if(!fwNotes)return;if(!notes||!notes.length){fwNotes.style.display='none';fwNotes.innerHTML='';return;}"
+          "fwNotes.style.display='block';fwNotes.innerHTML='<strong>Release notes</strong><ul style=\"margin:8px 0 0 18px;padding:0;\">'+notes.map(function(n){return '<li>'+escHtml(n)+'</li>';}).join('')+'</ul>';}";
   html += "if(fwBtn){fwBtn.addEventListener('click',function(){"
           "fwBtn.disabled=true;"
+          "showFwNotes([]);"
           "if(fwStatus)fwStatus.textContent='Checking GitHub release...';"
           "fetch('/api/firmware/check',{cache:'no-store'})"
           ".then(function(r){return r.json().catch(function(){return {ok:false,error:'HTTP '+r.status};});})"
-          ".then(function(j){if(!j.ok)throw new Error(j.error||'Check failed');if(fwStatus)fwStatus.textContent=(j.update_available?'New PrintSphere firmware available: ':'Latest PrintSphere companion firmware: ')+(j.latest_version||'?')+'. Current: '+(j.current_version||'?')+'. Use the web installer to install updates.';})"
+          ".then(function(j){if(!j.ok)throw new Error(j.error||'Check failed');if(fwStatus)fwStatus.textContent=(j.update_available?'New PrintSphere firmware available: ':'Latest PrintSphere companion firmware: ')+(j.latest_version||'?')+'. Current: '+(j.current_version||'?')+'. Use the web installer to install updates.';showFwNotes(j.release_notes||j.releaseNotes);})"
           ".catch(function(e){if(fwStatus)fwStatus.textContent='Check failed: '+e.message;})"
           ".finally(function(){fwBtn.disabled=false;});"
           "});}";
@@ -3392,6 +3422,7 @@ esp_err_t SetupPortal::handle_firmware_check(httpd_req_t* request) {
   if (cJSON_IsString(version_item) && version_item->valuestring != nullptr) {
     latest_version = version_item->valuestring;
   }
+  const std::string notes_json = release_notes_json(root);
   cJSON_Delete(root);
 
   if (latest_version.empty()) {
@@ -3408,7 +3439,9 @@ esp_err_t SetupPortal::handle_firmware_check(httpd_req_t* request) {
   body += json_escape(latest_display_version);
   body += "\",\"update_available\":";
   body += update_available ? "true" : "false";
-  body += ",\"installer_url\":\"https://lerxtwood.github.io/capsule-radar/\"}";
+  body += ",\"installer_url\":\"https://lerxtwood.github.io/capsule-radar/\",\"release_notes\":";
+  body += notes_json;
+  body += "}";
   send_json(request, body);
   return ESP_OK;
 }
