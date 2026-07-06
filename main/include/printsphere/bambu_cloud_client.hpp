@@ -55,12 +55,16 @@ struct BambuCloudSnapshot {
   float progress_percent = 0.0f;
   bool progress_is_download_related = false;
   float nozzle_temp_c = 0.0f;
+  float nozzle_target_temp_c = 0.0f;
   uint64_t nozzle_temp_last_update_ms = 0;
   float bed_temp_c = 0.0f;
+  float bed_target_temp_c = 0.0f;
   uint64_t bed_temp_last_update_ms = 0;
   float chamber_temp_c = 0.0f;
+  float chamber_target_temp_c = 0.0f;
   uint64_t chamber_temp_last_update_ms = 0;
   float secondary_nozzle_temp_c = 0.0f;
+  float secondary_nozzle_target_temp_c = 0.0f;
   uint64_t secondary_nozzle_temp_last_update_ms = 0;
   int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
   bool chamber_light_supported = false;
@@ -116,12 +120,16 @@ class BambuCloudClient {
     float progress_percent = 0.0f;
     bool progress_is_download_related = false;
     float nozzle_temp_c = 0.0f;
+    float nozzle_target_temp_c = 0.0f;
     uint64_t nozzle_temp_last_update_ms = 0;
     float bed_temp_c = 0.0f;
+    float bed_target_temp_c = 0.0f;
     uint64_t bed_temp_last_update_ms = 0;
     float chamber_temp_c = 0.0f;
+    float chamber_target_temp_c = 0.0f;
     uint64_t chamber_temp_last_update_ms = 0;
     float secondary_nozzle_temp_c = 0.0f;
+    float secondary_nozzle_target_temp_c = 0.0f;
     uint64_t secondary_nozzle_temp_last_update_ms = 0;
     int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
     bool chamber_light_supported = false;

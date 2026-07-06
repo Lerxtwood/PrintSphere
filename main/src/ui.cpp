@@ -93,6 +93,7 @@ constexpr uint32_t kCardRevealStaggerMs = 55U;
 constexpr uint32_t kRingBaseDark = 0x101010;
 constexpr uint32_t kRingIdleSolid = 0x404040;
 constexpr char kDegreeC[] = "\xC2\xB0""C";
+constexpr char kDegree[] = "\xC2\xB0";
 constexpr char kMdiClock[] = "\xF3\xB1\x91\x8E";
 constexpr char kMdiNozzle[] = "\xF3\xB0\xB9\x9B";
 constexpr char kMdiBed[] = "\xF3\xB1\xA1\x9B";
@@ -501,6 +502,38 @@ std::string optional_temperature_text(const char* label, float temperature_c, bo
   char buffer[40] = {};
   std::snprintf(buffer, sizeof(buffer), "%s %.0f%s", label, temperature_c, kDegreeC);
   return buffer;
+}
+
+bool target_temperature_visible(float target_c, bool target_known, float current_c) {
+  return (target_known || target_c > 0.0f) && target_c > 0.0f &&
+         std::fabs(target_c - current_c) >= 0.5f;
+}
+
+bool temperature_target_will_render(float current_c, bool current_known,
+                                    float target_c, bool target_known) {
+  return (current_known || current_c > 0.0f) &&
+         target_temperature_visible(target_c, target_known, current_c);
+}
+
+void format_temperature(char* buffer, size_t buffer_size, const char* prefix,
+                        float current_c, bool current_known,
+                        float target_c, bool target_known) {
+  if (buffer == nullptr || buffer_size == 0U) {
+    return;
+  }
+  const bool has_current = current_known || current_c > 0.0f;
+  const bool show_target =
+      temperature_target_will_render(current_c, current_known, target_c, target_known);
+  const char* safe_prefix = prefix != nullptr ? prefix : "";
+  if (has_current && show_target) {
+    std::snprintf(buffer, buffer_size, "%s%.0f/%.0f%s", safe_prefix, current_c, target_c, kDegree);
+  } else if (has_current) {
+    std::snprintf(buffer, buffer_size, "%s%.0f%s", safe_prefix, current_c, kDegreeC);
+  } else if (show_target) {
+    std::snprintf(buffer, buffer_size, "%s--/%.0f%s", safe_prefix, target_c, kDegree);
+  } else {
+    std::snprintf(buffer, buffer_size, "%s--%s", safe_prefix, kDegreeC);
+  }
 }
 
 bool decode_preview_png(const std::shared_ptr<std::vector<uint8_t>>& encoded_blob,
@@ -2149,26 +2182,22 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
         active_is_left ? snapshot.secondary_nozzle_temp_c : snapshot.nozzle_temp_c;
     const bool right_known = active_is_left ? secondary_nozzle_known : active_nozzle_known;
 
-    if (left_known) {
-      std::snprintf(temp_buffer, sizeof(temp_buffer), "L %.0f%s", left_temp, kDegreeC);
-    } else {
-      std::snprintf(temp_buffer, sizeof(temp_buffer), "L --%s", kDegreeC);
-    }
+    lv_obj_set_style_text_font(nozzle_value_label_, &dosis_32, 0);
+    lv_obj_set_style_text_font(nozzle_aux_label_, &dosis_32, 0);
+
+    format_temperature(temp_buffer, sizeof(temp_buffer), "L ", left_temp, left_known,
+                       0.0f, false);
     set_label_text_if_changed(nozzle_value_label_, temp_buffer);
-    if (right_known) {
-      std::snprintf(temp_buffer, sizeof(temp_buffer), "R %.0f%s", right_temp, kDegreeC);
-    } else {
-      std::snprintf(temp_buffer, sizeof(temp_buffer), "R --%s", kDegreeC);
-    }
+    format_temperature(temp_buffer, sizeof(temp_buffer), "R ", right_temp, right_known,
+                       0.0f, false);
     set_label_text_if_changed(nozzle_aux_label_, temp_buffer);
     nozzle_aux_visible_ = true;
     lv_obj_set_style_text_color(nozzle_aux_label_, lv_color_hex(0xFFFFFF), 0);
   } else {
-    if (active_nozzle_known) {
-      std::snprintf(temp_buffer, sizeof(temp_buffer), "%.0f%s", snapshot.nozzle_temp_c, kDegreeC);
-    } else {
-      std::snprintf(temp_buffer, sizeof(temp_buffer), "--%s", kDegreeC);
-    }
+    lv_obj_set_style_text_font(nozzle_value_label_, &dosis_32, 0);
+    lv_obj_set_style_text_font(nozzle_aux_label_, &dosis_32, 0);
+    format_temperature(temp_buffer, sizeof(temp_buffer), "", snapshot.nozzle_temp_c,
+                       active_nozzle_known, 0.0f, false);
     set_label_text_if_changed(nozzle_value_label_, temp_buffer);
 
     const std::string nozzle_aux =
@@ -2181,16 +2210,16 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     }
   }
 
-  if (snapshot.bed_temp_known || snapshot.bed_temp_c > 0.0f) {
-    std::snprintf(temp_buffer, sizeof(temp_buffer), "%.0f%s", snapshot.bed_temp_c, kDegreeC);
-  } else {
-    std::snprintf(temp_buffer, sizeof(temp_buffer), "--%s", kDegreeC);
-  }
+  format_temperature(temp_buffer, sizeof(temp_buffer), "", snapshot.bed_temp_c,
+                     snapshot.bed_temp_known || snapshot.bed_temp_c > 0.0f,
+                     snapshot.bed_target_temp_c, snapshot.bed_target_temp_known);
   set_label_text_if_changed(bed_value_label_, temp_buffer);
 
   bed_aux_visible_ = snapshot.chamber_temp_known || snapshot.chamber_temp_c > 0.0f;
   if (bed_aux_visible_) {
-    std::snprintf(temp_buffer, sizeof(temp_buffer), "%.0f%s", snapshot.chamber_temp_c, kDegreeC);
+    format_temperature(temp_buffer, sizeof(temp_buffer), "", snapshot.chamber_temp_c,
+                       snapshot.chamber_temp_known || snapshot.chamber_temp_c > 0.0f,
+                       snapshot.chamber_target_temp_c, snapshot.chamber_target_temp_known);
     set_label_text_if_changed(bed_aux_label_, temp_buffer);
     lv_obj_set_style_text_color(bed_aux_label_, lv_color_hex(0xFFFFFF), 0);
   }
@@ -3245,6 +3274,7 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_set_style_text_font(nozzle_value_label_, dosis32, 0);
   lv_obj_set_style_text_color(nozzle_value_label_, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_width(nozzle_value_label_, 120);
+  lv_label_set_long_mode(nozzle_value_label_, LV_LABEL_LONG_CLIP);
   lv_obj_set_style_text_align(nozzle_value_label_, LV_TEXT_ALIGN_LEFT, 0);
   lv_obj_align(nozzle_value_label_, LV_ALIGN_CENTER, -108, -28);
   set_label_text_if_changed(nozzle_value_label_, std::string("--") + kDegreeC);
@@ -3252,7 +3282,7 @@ esp_err_t Ui::build_dashboard() {
   nozzle_aux_label_ = lv_label_create(page1_);
   set_label_text_if_changed(nozzle_aux_label_, "");
   lv_obj_set_width(nozzle_aux_label_, 120);
-  lv_label_set_long_mode(nozzle_aux_label_, LV_LABEL_LONG_WRAP);
+  lv_label_set_long_mode(nozzle_aux_label_, LV_LABEL_LONG_CLIP);
   lv_obj_set_style_text_align(nozzle_aux_label_, LV_TEXT_ALIGN_LEFT, 0);
   lv_obj_set_style_text_font(nozzle_aux_label_, dosis32, 0);
   lv_obj_set_style_text_color(nozzle_aux_label_, lv_color_hex(0x94A3B8), 0);

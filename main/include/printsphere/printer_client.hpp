@@ -62,9 +62,13 @@ class PrinterClient {
     float progress_percent = 0.0f;
     bool progress_is_download_related = false;
     float nozzle_temp_c = 0.0f;
+    float nozzle_target_temp_c = 0.0f;
     float bed_temp_c = 0.0f;
+    float bed_target_temp_c = 0.0f;
     float chamber_temp_c = 0.0f;
+    float chamber_target_temp_c = 0.0f;
     float secondary_nozzle_temp_c = 0.0f;
+    float secondary_nozzle_target_temp_c = 0.0f;
     bool chamber_light_supported = false;
     bool chamber_light_state_known = false;
     bool chamber_light_on = false;

@@ -127,12 +127,20 @@ struct PrinterSnapshot {
   bool progress_is_download_related = false;
   float nozzle_temp_c = 0.0f;
   bool nozzle_temp_known = false;
+  float nozzle_target_temp_c = 0.0f;
+  bool nozzle_target_temp_known = false;
   float bed_temp_c = 0.0f;
   bool bed_temp_known = false;
+  float bed_target_temp_c = 0.0f;
+  bool bed_target_temp_known = false;
   float chamber_temp_c = 0.0f;
   bool chamber_temp_known = false;
+  float chamber_target_temp_c = 0.0f;
+  bool chamber_target_temp_known = false;
   float secondary_nozzle_temp_c = 0.0f;
   bool secondary_nozzle_temp_known = false;
+  float secondary_nozzle_target_temp_c = 0.0f;
+  bool secondary_nozzle_target_temp_known = false;
   int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
   bool chamber_light_supported = false;
   bool chamber_light_state_known = false;

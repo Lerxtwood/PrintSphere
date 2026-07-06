@@ -548,14 +548,27 @@ void apply_local_metrics_bundle(PrinterSnapshot& target, const PrinterSnapshot& 
 void apply_local_temperature_bundle(PrinterSnapshot& target, const PrinterSnapshot& local_snapshot) {
   target.nozzle_temp_c = local_snapshot.nozzle_temp_c;
   target.nozzle_temp_known = local_snapshot.nozzle_temp_known || local_snapshot.nozzle_temp_c > 0.0f;
+  target.nozzle_target_temp_c = local_snapshot.nozzle_target_temp_c;
+  target.nozzle_target_temp_known =
+      local_snapshot.nozzle_target_temp_known || local_snapshot.nozzle_target_temp_c > 0.0f;
   target.bed_temp_c = local_snapshot.bed_temp_c;
   target.bed_temp_known = local_snapshot.bed_temp_known || local_snapshot.bed_temp_c > 0.0f;
+  target.bed_target_temp_c = local_snapshot.bed_target_temp_c;
+  target.bed_target_temp_known =
+      local_snapshot.bed_target_temp_known || local_snapshot.bed_target_temp_c > 0.0f;
   target.chamber_temp_c = local_snapshot.chamber_temp_c;
   target.chamber_temp_known =
       local_snapshot.chamber_temp_known || local_snapshot.chamber_temp_c > 0.0f;
+  target.chamber_target_temp_c = local_snapshot.chamber_target_temp_c;
+  target.chamber_target_temp_known =
+      local_snapshot.chamber_target_temp_known || local_snapshot.chamber_target_temp_c > 0.0f;
   target.secondary_nozzle_temp_c = local_snapshot.secondary_nozzle_temp_c;
   target.secondary_nozzle_temp_known =
       local_snapshot.secondary_nozzle_temp_known || local_snapshot.secondary_nozzle_temp_c > 0.0f;
+  target.secondary_nozzle_target_temp_c = local_snapshot.secondary_nozzle_target_temp_c;
+  target.secondary_nozzle_target_temp_known =
+      local_snapshot.secondary_nozzle_target_temp_known ||
+      local_snapshot.secondary_nozzle_target_temp_c > 0.0f;
   if (local_snapshot.active_nozzle_index >= 0) {
     target.active_nozzle_index = local_snapshot.active_nozzle_index;
   }
@@ -567,16 +580,28 @@ void apply_cloud_temperature_bundle(PrinterSnapshot& target, const BambuCloudSna
   target.nozzle_temp_known =
       cloud_temperature_known(cloud_snapshot.nozzle_temp_last_update_ms, cloud_snapshot.connected);
   target.nozzle_temp_c = target.nozzle_temp_known ? cloud_snapshot.nozzle_temp_c : 0.0f;
+  target.nozzle_target_temp_c =
+      target.nozzle_temp_known ? cloud_snapshot.nozzle_target_temp_c : 0.0f;
+  target.nozzle_target_temp_known = target.nozzle_target_temp_c > 0.0f;
   target.bed_temp_known =
       cloud_temperature_known(cloud_snapshot.bed_temp_last_update_ms, cloud_snapshot.connected);
   target.bed_temp_c = target.bed_temp_known ? cloud_snapshot.bed_temp_c : 0.0f;
+  target.bed_target_temp_c =
+      target.bed_temp_known ? cloud_snapshot.bed_target_temp_c : 0.0f;
+  target.bed_target_temp_known = target.bed_target_temp_c > 0.0f;
   target.chamber_temp_known =
       cloud_temperature_known(cloud_snapshot.chamber_temp_last_update_ms, cloud_snapshot.connected);
   target.chamber_temp_c = target.chamber_temp_known ? cloud_snapshot.chamber_temp_c : 0.0f;
+  target.chamber_target_temp_c =
+      target.chamber_temp_known ? cloud_snapshot.chamber_target_temp_c : 0.0f;
+  target.chamber_target_temp_known = target.chamber_target_temp_c > 0.0f;
   target.secondary_nozzle_temp_known = cloud_temperature_known(
       cloud_snapshot.secondary_nozzle_temp_last_update_ms, cloud_snapshot.connected);
   target.secondary_nozzle_temp_c =
       target.secondary_nozzle_temp_known ? cloud_snapshot.secondary_nozzle_temp_c : 0.0f;
+  target.secondary_nozzle_target_temp_c =
+      target.secondary_nozzle_temp_known ? cloud_snapshot.secondary_nozzle_target_temp_c : 0.0f;
+  target.secondary_nozzle_target_temp_known = target.secondary_nozzle_target_temp_c > 0.0f;
   if (cloud_snapshot.active_nozzle_index >= 0) {
     target.active_nozzle_index = cloud_snapshot.active_nozzle_index;
   }

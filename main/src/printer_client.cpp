@@ -928,6 +928,14 @@ float packed_temp_current_value(int packed, float fallback) {
   return static_cast<float>(packed & 0xFFFF);
 }
 
+float packed_temp_target_value(int packed, float fallback) {
+  if (packed < 0) {
+    return fallback;
+  }
+  const int target = (packed >> 16) & 0xFFFF;
+  return target > 0 ? static_cast<float>(target) : fallback;
+}
+
 float normalize_temperature_candidate(float value) {
   if (value > static_cast<float>(0xFFFF)) {
     return packed_temp_current_value(static_cast<int>(value), value);
@@ -938,6 +946,8 @@ float normalize_temperature_candidate(float value) {
 struct NozzleTemperatureBundle {
   float active = 0.0f;
   float secondary = 0.0f;
+  float active_target = 0.0f;
+  float secondary_target = 0.0f;
   int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
 };
 
@@ -950,8 +960,10 @@ int extract_active_nozzle_index(const cJSON* device) {
 }
 
 void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_index,
-                                  float* active_temp, float* secondary_temp) {
-  if (!cJSON_IsArray(info_array) || active_temp == nullptr || secondary_temp == nullptr) {
+                                  float* active_temp, float* secondary_temp,
+                                  float* active_target, float* secondary_target) {
+  if (!cJSON_IsArray(info_array) || active_temp == nullptr || secondary_temp == nullptr ||
+      active_target == nullptr || secondary_target == nullptr) {
     return;
   }
 
@@ -965,6 +977,12 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
     }
 
     const float temp = normalize_temperature_candidate(json_number_local(item, "temp", -1000.0f));
+    const int packed = json_int_local(item, "temp", -1);
+    const float target = packed_temp_target_value(
+        packed,
+        normalize_temperature_candidate(json_number_local(item, "target_temp",
+                                      json_number_local(item, "target",
+                                      json_number_local(item, "tar", -1000.0f)))));
     const int id = json_int_local(item, "id", -1);
     ESP_LOGI(kTag, "[DBG] nozzle info[%d]: id=%d temp=%.1f (raw int=%d)",
              i, id, temp, (int)temp);
@@ -978,8 +996,10 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
 
     if (id == active_nozzle_index) {
       *active_temp = temp;
+      if (target > -999.0f) *active_target = target;
     } else if (id >= 0 && *secondary_temp <= 0.0f) {
       *secondary_temp = temp;
+      if (target > -999.0f) *secondary_target = target;
     } else if (fallback_secondary < -999.0f) {
       fallback_secondary = temp;
     }
@@ -1011,6 +1031,28 @@ float extract_bed_temperature_c(const cJSON* print, float fallback) {
   return json_number_local(print, "bed_temper", fallback);
 }
 
+float extract_bed_target_temperature_c(const cJSON* print, float fallback) {
+  const cJSON* device = child_object_local(print, "device");
+  if (const cJSON* bed_info = child_object_local(child_object_local(device, "bed"), "info");
+      bed_info != nullptr) {
+    const int packed = json_int_local(bed_info, "temp", -1);
+    if (packed >= 0) {
+      return packed_temp_target_value(packed, fallback);
+    }
+  }
+
+  const int packed = json_int_local(device, "bed_temp", -1);
+  if (packed >= 0) {
+    return packed_temp_target_value(packed, fallback);
+  }
+
+  return normalize_temperature_candidate(
+      json_number_local(print, "bed_target_temper",
+                        json_number_local(print, "bed_target_temp",
+                                          json_number_local(print, "bed_target_temperature",
+                                                            fallback))));
+}
+
 float extract_chamber_temperature_c(const cJSON* print, float fallback) {
   const cJSON* device = child_object_local(print, "device");
   if (const cJSON* ctc_info = child_object_local(child_object_local(device, "ctc"), "info");
@@ -1032,14 +1074,51 @@ float extract_chamber_temperature_c(const cJSON* print, float fallback) {
   return json_number_local(print, "chamber_temper", fallback);
 }
 
+float extract_chamber_target_temperature_c(const cJSON* print, float fallback) {
+  const cJSON* device = child_object_local(print, "device");
+  if (const cJSON* ctc_info = child_object_local(child_object_local(device, "ctc"), "info");
+      ctc_info != nullptr) {
+    const int packed = json_int_local(ctc_info, "temp", -1);
+    if (packed >= 0) {
+      return packed_temp_target_value(packed, fallback);
+    }
+  }
+
+  if (const cJSON* chamber_info = child_object_local(child_object_local(device, "chamber"), "info");
+      chamber_info != nullptr) {
+    const int packed = json_int_local(chamber_info, "temp", -1);
+    if (packed >= 0) {
+      return packed_temp_target_value(packed, fallback);
+    }
+  }
+
+  return normalize_temperature_candidate(
+      json_number_local(print, "chamber_target_temper",
+                        json_number_local(print, "chamber_target_temp",
+                                          json_number_local(print, "chamber_target_temperature",
+                                                            fallback))));
+}
+
 NozzleTemperatureBundle extract_nozzle_temperature_bundle(const cJSON* print, float active_fallback,
-                                                          float secondary_fallback) {
+                                                          float secondary_fallback,
+                                                          float active_target_fallback,
+                                                          float secondary_target_fallback) {
   NozzleTemperatureBundle bundle{active_fallback, secondary_fallback};
+  bundle.active_target = active_target_fallback;
+  bundle.secondary_target = secondary_target_fallback;
   const float direct = json_number_local(print, "nozzle_temper", -1000.0f);
   ESP_LOGD(kTag, "[DBG] nozzle_temper=%.1f (raw int=%d) fallback=%.1f",
            direct, (int)direct, active_fallback);
   if (direct > -999.0f) {
     bundle.active = direct;
+  }
+  const float direct_target = normalize_temperature_candidate(
+      json_number_local(print, "nozzle_target_temper",
+                        json_number_local(print, "nozzle_target_temp",
+                                          json_number_local(print, "nozzle_target_temperature",
+                                                            -1000.0f))));
+  if (direct_target > -999.0f) {
+    bundle.active_target = direct_target;
   }
 
   const cJSON* device = child_object_local(print, "device");
@@ -1048,9 +1127,11 @@ NozzleTemperatureBundle extract_nozzle_temperature_bundle(const cJSON* print, fl
   bundle.active_nozzle_index = active_nozzle_index;
   const int merge_index = active_nozzle_index >= 0 ? active_nozzle_index : 0;
   merge_nozzle_temp_candidates(child_array_local(child_object_local(device, "nozzle"), "info"),
-                               merge_index, &bundle.active, &bundle.secondary);
+                               merge_index, &bundle.active, &bundle.secondary,
+                               &bundle.active_target, &bundle.secondary_target);
   merge_nozzle_temp_candidates(child_array_local(extruder, "info"), merge_index,
-                               &bundle.active, &bundle.secondary);
+                               &bundle.active, &bundle.secondary,
+                               &bundle.active_target, &bundle.secondary_target);
   ESP_LOGD(kTag, "[DBG] nozzle bundle final: active=%.1f secondary=%.1f active_nozzle_idx=%d",
            bundle.active, bundle.secondary, active_nozzle_index);
   return bundle;
@@ -1499,12 +1580,20 @@ PrinterSnapshot PrinterClient::build_snapshot_from_runtime(
   snapshot.progress_is_download_related = runtime.progress_is_download_related;
   snapshot.nozzle_temp_c = runtime.nozzle_temp_c;
   snapshot.nozzle_temp_known = runtime.nozzle_temp_c > 0.0f;
+  snapshot.nozzle_target_temp_c = runtime.nozzle_target_temp_c;
+  snapshot.nozzle_target_temp_known = runtime.nozzle_target_temp_c > 0.0f;
   snapshot.bed_temp_c = runtime.bed_temp_c;
   snapshot.bed_temp_known = runtime.bed_temp_c > 0.0f;
+  snapshot.bed_target_temp_c = runtime.bed_target_temp_c;
+  snapshot.bed_target_temp_known = runtime.bed_target_temp_c > 0.0f;
   snapshot.chamber_temp_c = runtime.chamber_temp_c;
   snapshot.chamber_temp_known = runtime.chamber_temp_c > 0.0f;
+  snapshot.chamber_target_temp_c = runtime.chamber_target_temp_c;
+  snapshot.chamber_target_temp_known = runtime.chamber_target_temp_c > 0.0f;
   snapshot.secondary_nozzle_temp_c = runtime.secondary_nozzle_temp_c;
   snapshot.secondary_nozzle_temp_known = runtime.secondary_nozzle_temp_c > 0.0f;
+  snapshot.secondary_nozzle_target_temp_c = runtime.secondary_nozzle_target_temp_c;
+  snapshot.secondary_nozzle_target_temp_known = runtime.secondary_nozzle_target_temp_c > 0.0f;
   snapshot.active_nozzle_index = runtime.active_nozzle_index;
   snapshot.chamber_light_supported = runtime.chamber_light_supported;
   snapshot.chamber_light_state_known = runtime.chamber_light_state_known;
@@ -2017,14 +2106,22 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     }
     const NozzleTemperatureBundle nozzle_temps =
         extract_nozzle_temperature_bundle(print, runtime.nozzle_temp_c,
-                                          runtime.secondary_nozzle_temp_c);
+                                          runtime.secondary_nozzle_temp_c,
+                                          runtime.nozzle_target_temp_c,
+                                          runtime.secondary_nozzle_target_temp_c);
     runtime.nozzle_temp_c = nozzle_temps.active;
     runtime.secondary_nozzle_temp_c = nozzle_temps.secondary;
+    runtime.nozzle_target_temp_c = nozzle_temps.active_target;
+    runtime.secondary_nozzle_target_temp_c = nozzle_temps.secondary_target;
     if (nozzle_temps.active_nozzle_index >= 0) {
       runtime.active_nozzle_index = nozzle_temps.active_nozzle_index;
     }
     runtime.bed_temp_c = extract_bed_temperature_c(print, runtime.bed_temp_c);
+    runtime.bed_target_temp_c =
+        extract_bed_target_temperature_c(print, runtime.bed_target_temp_c);
     runtime.chamber_temp_c = extract_chamber_temperature_c(print, runtime.chamber_temp_c);
+    runtime.chamber_target_temp_c =
+        extract_chamber_target_temperature_c(print, runtime.chamber_target_temp_c);
     runtime.current_layer = extract_current_layer_local(print, runtime.current_layer);
     runtime.total_layers = extract_total_layers_local(print, runtime.total_layers);
     runtime.local_model = detect_printer_model_from_payload(print, runtime.local_model);

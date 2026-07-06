@@ -1305,6 +1305,14 @@ float packed_temp_current_value(int packed, float fallback) {
   return static_cast<float>(packed & 0xFFFF);
 }
 
+float packed_temp_target_value(int packed, float fallback) {
+  if (packed < 0) {
+    return fallback;
+  }
+  const int target = (packed >> 16) & 0xFFFF;
+  return target > 0 ? static_cast<float>(target) : fallback;
+}
+
 float normalize_temperature_candidate(float value) {
   if (value > static_cast<float>(0xFFFF)) {
     return packed_temp_current_value(static_cast<int>(value), value);
@@ -1315,8 +1323,12 @@ float normalize_temperature_candidate(float value) {
 struct NozzleTemperatureBundle {
   float active = 0.0f;
   float secondary = 0.0f;
+  float active_target = 0.0f;
+  float secondary_target = 0.0f;
   bool active_present = false;
   bool secondary_present = false;
+  bool active_target_present = false;
+  bool secondary_target_present = false;
   int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
 };
 
@@ -1552,9 +1564,13 @@ int extract_active_nozzle_index(const cJSON* device) {
 
 void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_index,
                                   float* active_temp, bool* active_present,
-                                  float* secondary_temp, bool* secondary_present) {
+                                  float* secondary_temp, bool* secondary_present,
+                                  float* active_target, bool* active_target_present,
+                                  float* secondary_target, bool* secondary_target_present) {
   if (!cJSON_IsArray(info_array) || active_temp == nullptr || active_present == nullptr ||
-      secondary_temp == nullptr || secondary_present == nullptr) {
+      secondary_temp == nullptr || secondary_present == nullptr ||
+      active_target == nullptr || active_target_present == nullptr ||
+      secondary_target == nullptr || secondary_target_present == nullptr) {
     return;
   }
 
@@ -1569,6 +1585,12 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
 
     const float temp = normalize_temperature_candidate(
         json_number_local(item, "temp", -1000.0f));
+    const int packed = json_int_local(item, "temp", -1);
+    const float target = packed_temp_target_value(
+        packed,
+        normalize_temperature_candidate(json_number_local(item, "target_temp",
+                                      json_number_local(item, "target",
+                                      json_number_local(item, "tar", -1000.0f)))));
     if (temp <= -999.0f) {
       continue;
     }
@@ -1581,9 +1603,17 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
     if (id == active_nozzle_index) {
       *active_temp = temp;
       *active_present = true;
+      if (target > -999.0f) {
+        *active_target = target;
+        *active_target_present = true;
+      }
     } else if (id >= 0 && *secondary_temp <= 0.0f) {
       *secondary_temp = temp;
       *secondary_present = true;
+      if (target > -999.0f) {
+        *secondary_target = target;
+        *secondary_target_present = true;
+      }
     } else if (fallback_secondary < -999.0f) {
       fallback_secondary = temp;
     }
@@ -1601,8 +1631,12 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
 
 NozzleTemperatureBundle extract_cloud_nozzle_temperature_bundle(const cJSON* item,
                                                                 float active_fallback,
-                                                                float secondary_fallback) {
+                                                                float secondary_fallback,
+                                                                float active_target_fallback,
+                                                                float secondary_target_fallback) {
   NozzleTemperatureBundle bundle{active_fallback, secondary_fallback};
+  bundle.active_target = active_target_fallback;
+  bundle.secondary_target = secondary_target_fallback;
   const cJSON* item_print = child_object_local(item, "print");
 
   for (const cJSON* source : {item, item_print}) {
@@ -1617,6 +1651,15 @@ NozzleTemperatureBundle extract_cloud_nozzle_temperature_bundle(const cJSON* ite
       bundle.active = direct;
       bundle.active_present = true;
     }
+    const float direct_target = normalize_temperature_candidate(
+        json_number_local(source, "nozzle_target_temper",
+                          json_number_local(source, "nozzle_target_temp",
+                                            json_number_local(source, "nozzle_target_temperature",
+                                                              -1000.0f))));
+    if (direct_target > -999.0f) {
+      bundle.active_target = direct_target;
+      bundle.active_target_present = true;
+    }
 
     const cJSON* device = child_object_local(source, "device");
     if (device == nullptr) {
@@ -1628,10 +1671,14 @@ NozzleTemperatureBundle extract_cloud_nozzle_temperature_bundle(const cJSON* ite
     const int merge_index = active_nozzle_index >= 0 ? active_nozzle_index : 0;
     merge_nozzle_temp_candidates(child_array_local(child_object_local(device, "nozzle"), "info"),
                                  merge_index, &bundle.active, &bundle.active_present,
-                                 &bundle.secondary, &bundle.secondary_present);
+                                 &bundle.secondary, &bundle.secondary_present,
+                                 &bundle.active_target, &bundle.active_target_present,
+                                 &bundle.secondary_target, &bundle.secondary_target_present);
     merge_nozzle_temp_candidates(child_array_local(child_object_local(device, "extruder"), "info"),
                                  merge_index, &bundle.active, &bundle.active_present,
-                                 &bundle.secondary, &bundle.secondary_present);
+                                 &bundle.secondary, &bundle.secondary_present,
+                                 &bundle.active_target, &bundle.active_target_present,
+                                 &bundle.secondary_target, &bundle.secondary_target_present);
   }
 
   if (bundle.active <= 0.0f) {
@@ -1779,6 +1826,46 @@ TemperatureSample extract_cloud_bed_temperature_c(const cJSON* item, float fallb
   return sample;
 }
 
+TemperatureSample extract_cloud_bed_target_temperature_c(const cJSON* item, float fallback) {
+  TemperatureSample sample{fallback, false};
+  const cJSON* item_print = child_object_local(item, "print");
+
+  for (const cJSON* source : {item, item_print}) {
+    if (source == nullptr) {
+      continue;
+    }
+    const cJSON* device = child_object_local(source, "device");
+    if (const cJSON* bed_info = child_object_local(child_object_local(device, "bed"), "info");
+        bed_info != nullptr) {
+      const int packed = json_int_local(bed_info, "temp", -1);
+      if (packed >= 0) {
+        sample.value = packed_temp_target_value(packed, fallback);
+        sample.present = sample.value > 0.0f;
+        return sample;
+      }
+    }
+
+    const int packed = json_int_local(device, "bed_temp", -1);
+    if (packed >= 0) {
+      sample.value = packed_temp_target_value(packed, fallback);
+      sample.present = sample.value > 0.0f;
+      return sample;
+    }
+
+    const float direct = normalize_temperature_candidate(
+        json_number_local(source, "bed_target_temper",
+                          json_number_local(source, "bed_target_temp",
+                                            json_number_local(source, "bed_target_temperature",
+                                                              -1000.0f))));
+    if (direct > -999.0f) {
+      sample.value = direct;
+      sample.present = true;
+      return sample;
+    }
+  }
+  return sample;
+}
+
 TemperatureSample extract_cloud_chamber_temperature_c(const cJSON* item, float fallback) {
   TemperatureSample sample{fallback, false};
   const cJSON* item_print = child_object_local(item, "print");
@@ -1829,6 +1916,48 @@ TemperatureSample extract_cloud_chamber_temperature_c(const cJSON* item, float f
     if (direct > -999.0f) {
       sample.value = direct;
       sample.present = true;
+    }
+  }
+  return sample;
+}
+
+TemperatureSample extract_cloud_chamber_target_temperature_c(const cJSON* item, float fallback) {
+  TemperatureSample sample{fallback, false};
+  const cJSON* item_print = child_object_local(item, "print");
+
+  for (const cJSON* source : {item, item_print}) {
+    if (source == nullptr) {
+      continue;
+    }
+    const cJSON* device = child_object_local(source, "device");
+    if (const cJSON* ctc_info = child_object_local(child_object_local(device, "ctc"), "info");
+        ctc_info != nullptr) {
+      const int packed = json_int_local(ctc_info, "temp", -1);
+      if (packed >= 0) {
+        sample.value = packed_temp_target_value(packed, fallback);
+        sample.present = sample.value > 0.0f;
+        return sample;
+      }
+    }
+    if (const cJSON* chamber_info = child_object_local(child_object_local(device, "chamber"), "info");
+        chamber_info != nullptr) {
+      const int packed = json_int_local(chamber_info, "temp", -1);
+      if (packed >= 0) {
+        sample.value = packed_temp_target_value(packed, fallback);
+        sample.present = sample.value > 0.0f;
+        return sample;
+      }
+    }
+
+    const float direct = normalize_temperature_candidate(
+        json_number_local(source, "chamber_target_temper",
+                          json_number_local(source, "chamber_target_temp",
+                                            json_number_local(source, "chamber_target_temperature",
+                                                              -1000.0f))));
+    if (direct > -999.0f) {
+      sample.value = direct;
+      sample.present = true;
+      return sample;
     }
   }
   return sample;
@@ -2347,6 +2476,7 @@ void BambuCloudClient::publish_combined_snapshot() {
   }
   if (live_has_recent_state && (live.nozzle_temp_last_update_ms != 0 || live.nozzle_temp_c > 0.0f)) {
     current.nozzle_temp_c = live.nozzle_temp_c;
+    current.nozzle_target_temp_c = live.nozzle_target_temp_c;
     current.nozzle_temp_last_update_ms = live.nozzle_temp_last_update_ms;
   }
   if (live_has_recent_state && live.active_nozzle_index >= 0) {
@@ -2355,15 +2485,18 @@ void BambuCloudClient::publish_combined_snapshot() {
   if (live_has_recent_state &&
       (live.secondary_nozzle_temp_last_update_ms != 0 || live.secondary_nozzle_temp_c > 0.0f)) {
     current.secondary_nozzle_temp_c = live.secondary_nozzle_temp_c;
+    current.secondary_nozzle_target_temp_c = live.secondary_nozzle_target_temp_c;
     current.secondary_nozzle_temp_last_update_ms = live.secondary_nozzle_temp_last_update_ms;
   }
   if (live_has_recent_state && (live.bed_temp_last_update_ms != 0 || live.bed_temp_c > 0.0f)) {
     current.bed_temp_c = live.bed_temp_c;
+    current.bed_target_temp_c = live.bed_target_temp_c;
     current.bed_temp_last_update_ms = live.bed_temp_last_update_ms;
   }
   if (live_has_recent_state &&
       (live.chamber_temp_last_update_ms != 0 || live.chamber_temp_c > 0.0f)) {
     current.chamber_temp_c = live.chamber_temp_c;
+    current.chamber_target_temp_c = live.chamber_target_temp_c;
     current.chamber_temp_last_update_ms = live.chamber_temp_last_update_ms;
   }
   if (live_has_recent_state &&
@@ -3138,28 +3271,50 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
 
     const NozzleTemperatureBundle nozzle_temps =
         extract_cloud_nozzle_temperature_bundle(print, runtime.nozzle_temp_c,
-                                                runtime.secondary_nozzle_temp_c);
+                                                runtime.secondary_nozzle_temp_c,
+                                                runtime.nozzle_target_temp_c,
+                                                runtime.secondary_nozzle_target_temp_c);
     const TemperatureSample bed_temp =
         extract_cloud_bed_temperature_c(print, runtime.bed_temp_c);
+    const TemperatureSample bed_target_temp =
+        extract_cloud_bed_target_temperature_c(print, runtime.bed_target_temp_c);
     const TemperatureSample chamber_temp =
         extract_cloud_chamber_temperature_c(print, runtime.chamber_temp_c);
+    const TemperatureSample chamber_target_temp =
+        extract_cloud_chamber_target_temperature_c(print, runtime.chamber_target_temp_c);
     runtime.nozzle_temp_c = nozzle_temps.active;
     runtime.secondary_nozzle_temp_c = nozzle_temps.secondary;
+    runtime.nozzle_target_temp_c = nozzle_temps.active_target;
+    runtime.secondary_nozzle_target_temp_c = nozzle_temps.secondary_target;
     if (nozzle_temps.active_nozzle_index >= 0) {
       runtime.active_nozzle_index = nozzle_temps.active_nozzle_index;
     }
     runtime.bed_temp_c = bed_temp.value;
+    runtime.bed_target_temp_c = bed_target_temp.value;
     runtime.chamber_temp_c = chamber_temp.value;
+    runtime.chamber_target_temp_c = chamber_target_temp.value;
     if (nozzle_temps.active_present) {
+      runtime.nozzle_temp_last_update_ms = runtime.last_update_ms;
+    }
+    if (nozzle_temps.active_target_present) {
       runtime.nozzle_temp_last_update_ms = runtime.last_update_ms;
     }
     if (nozzle_temps.secondary_present) {
       runtime.secondary_nozzle_temp_last_update_ms = runtime.last_update_ms;
     }
+    if (nozzle_temps.secondary_target_present) {
+      runtime.secondary_nozzle_temp_last_update_ms = runtime.last_update_ms;
+    }
     if (bed_temp.present) {
       runtime.bed_temp_last_update_ms = runtime.last_update_ms;
     }
+    if (bed_target_temp.present) {
+      runtime.bed_temp_last_update_ms = runtime.last_update_ms;
+    }
     if (chamber_temp.present) {
+      runtime.chamber_temp_last_update_ms = runtime.last_update_ms;
+    }
+    if (chamber_target_temp.present) {
       runtime.chamber_temp_last_update_ms = runtime.last_update_ms;
     }
 
