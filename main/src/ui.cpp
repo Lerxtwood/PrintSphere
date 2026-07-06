@@ -667,9 +667,19 @@ struct RingVisual {
   bool animated() const { return anim_kind != RingAnimKind::kNone; }
 };
 
+std::string current_operation_text(const PrinterSnapshot& snapshot);
+
 RingVisual lifecycle_ring_visual(const PrinterSnapshot& snapshot, const ArcColorScheme& colors) {
   const int progress = std::clamp(static_cast<int>(std::lround(snapshot.progress_percent)), 0, 100);
   RingVisual visual = {};
+  const std::string operation = current_operation_text(snapshot);
+  const bool pre_print_operation = !operation.empty() && snapshot.current_layer == 0;
+  if (pre_print_operation) {
+    visual.main_hex = kRingBaseDark;
+    visual.indicator_hex = colors.printing;
+    visual.value_override = 0;
+    return visual;
+  }
 
   // Filament load/unload animation — direction derived from resolver's ui_status.
   if (snapshot.ui_status == "loading" || snapshot.ui_status == "unloading") {
@@ -794,6 +804,11 @@ RingVisual lifecycle_ring_visual(const PrinterSnapshot& snapshot, const ArcColor
 }
 
 uint32_t stable_status_text_hex(const PrinterSnapshot& snapshot, const ArcColorScheme& colors) {
+  const std::string operation = current_operation_text(snapshot);
+  if (!operation.empty() && snapshot.current_layer == 0) {
+    return colors.printing;
+  }
+
   // Filament
   if (snapshot.ui_status == "loading" || snapshot.ui_status == "unloading") {
     return colors.filament;
@@ -934,6 +949,126 @@ std::string station_portal_text(const PrinterSnapshot& snapshot) {
     return "Open " + snapshot.wifi_ip;
   }
   return "Open the portal on your Wi-Fi IP";
+}
+
+std::string lower_ui_text(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return value;
+}
+
+bool ui_text_contains(const std::string& haystack, const char* needle) {
+  return haystack.find(needle) != std::string::npos;
+}
+
+std::string titlecase_stage_text(std::string value) {
+  for (char& ch : value) {
+    if (ch == '_' || ch == '-' || ch == '/') {
+      ch = ' ';
+    }
+  }
+
+  std::string out;
+  out.reserve(value.size());
+  bool next_upper = true;
+  for (unsigned char raw : value) {
+    if (std::isspace(raw)) {
+      if (!out.empty() && out.back() != ' ') {
+        out.push_back(' ');
+      }
+      next_upper = true;
+      continue;
+    }
+    out.push_back(next_upper ? static_cast<char>(std::toupper(raw))
+                             : static_cast<char>(std::tolower(raw)));
+    next_upper = false;
+  }
+  while (!out.empty() && out.back() == ' ') {
+    out.pop_back();
+  }
+  return out;
+}
+
+std::string current_operation_text(const PrinterSnapshot& snapshot) {
+  const std::string status = lower_ui_text(snapshot.ui_status);
+  const std::string stage = lower_ui_text(!snapshot.raw_stage.empty() ? snapshot.raw_stage
+                                                                      : snapshot.stage);
+
+  if (status == "downloading" || ui_text_contains(stage, "download")) return "Downloading model";
+  if (ui_text_contains(stage, "heating_chamber") ||
+      ui_text_contains(stage, "chamber_preheating") ||
+      ui_text_contains(stage, "waiting_for_chamber_temperature")) {
+    return "Heating chamber";
+  }
+  if (ui_text_contains(stage, "heatbed_preheating") ||
+      ui_text_contains(stage, "heating_bed") ||
+      ui_text_contains(stage, "waiting_for_heatbed_temperature")) {
+    return "Heating bed";
+  }
+  if (ui_text_contains(stage, "nozzle_preheating") ||
+      ui_text_contains(stage, "heating_hotend") ||
+      ui_text_contains(stage, "waiting_for_nozzle_temperature")) {
+    return "Heating nozzle";
+  }
+  if (status == "preheating" || ui_text_contains(stage, "preheat") ||
+      ui_text_contains(stage, "heating")) return "Preheating";
+  if (status == "clean nozzle" || ui_text_contains(stage, "clean")) return "Cleaning nozzle";
+  if (status == "bed level" || ui_text_contains(stage, "bed_level") ||
+      ui_text_contains(stage, "leveling") || ui_text_contains(stage, "levelling") ||
+      ui_text_contains(stage, "measuring_surface")) {
+    return "Leveling bed";
+  }
+  if (ui_text_contains(stage, "flow_dynamics")) return "Calibrating flow dynamics";
+  if (ui_text_contains(stage, "flow dynamics")) return "Calibrating flow dynamics";
+  if (ui_text_contains(stage, "dynamic_flow")) return "Calibrating dynamic flow";
+  if (ui_text_contains(stage, "dynamic flow")) return "Calibrating dynamic flow";
+  if (ui_text_contains(stage, "calibrating_extrusion_flow")) {
+    return "Calibrating flow dynamics";
+  }
+  if (ui_text_contains(stage, "calibrating_extrusion")) return "Calibrating extrusion";
+  if (ui_text_contains(stage, "calibrating_micro_lidar")) return "Calibrating lidar";
+  if (ui_text_contains(stage, "calibrating_motor_noise")) return "Calibrating motor noise";
+  if (ui_text_contains(stage, "homing")) return "Homing toolhead";
+  if (ui_text_contains(stage, "foreign_object") || ui_text_contains(stage, "foreign object") ||
+      ui_text_contains(stage, "object_detection") || ui_text_contains(stage, "object detection") ||
+      ui_text_contains(stage, "heatbed_surface") || ui_text_contains(stage, "headbed_surface") ||
+      ui_text_contains(stage, "bed_surface")) {
+    return "Checking bed surface";
+  }
+  if (ui_text_contains(stage, "hotend_type") || ui_text_contains(stage, "hotend type") ||
+      ui_text_contains(stage, "hotend_pick_place") || ui_text_contains(stage, "hotend pick") ||
+      ui_text_contains(stage, "preparing_hotend")) {
+    return "Detecting hotend type";
+  }
+  if (ui_text_contains(stage, "changing_filament") || ui_text_contains(stage, "changing filament") ||
+      status == "loading" || status == "unloading") return "Changing filament";
+  if (ui_text_contains(stage, "nozzle_offset") || ui_text_contains(stage, "nozzle offset")) {
+    return "Calibrating nozzle offset";
+  }
+  if (ui_text_contains(stage, "calibrate_nozzle_offset")) return "Calibrating nozzle offset";
+  if (ui_text_contains(stage, "scanning_bed_surface")) return "Scanning bed surface";
+  if (ui_text_contains(stage, "identifying_build_plate")) return "Identifying build plate";
+  if (ui_text_contains(stage, "checking_extruder_temperature")) {
+    return "Checking extruder temperature";
+  }
+  if (ui_text_contains(stage, "check_material")) return "Checking material";
+
+  const bool pre_print_phase =
+      snapshot.lifecycle == PrintLifecycleState::kPreparing ||
+      status == "preheating" || status == "preparing" ||
+      (snapshot.print_active && snapshot.current_layer == 0 && snapshot.progress_percent < 10.0f);
+  if (status == "preparing") {
+    if (!stage.empty() && stage != "prepare" && stage != "preparing" &&
+        stage != "cloud-online" && stage != "cloud") {
+      return titlecase_stage_text(stage);
+    }
+    return "Preparing print";
+  }
+  if (pre_print_phase && !stage.empty() && stage != "printing" && stage != "running") {
+    return titlecase_stage_text(stage);
+  }
+  return {};
 }
 
 std::string detail_text(const PrinterSnapshot& snapshot) {
@@ -1921,11 +2056,16 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   LvglLockGuard::note_phase("ring_visual");
   apply_ring_visual_locked(snapshot);
 
-  LvglLockGuard::note_phase("labels");
-  char progress_buffer[8] = {};
-  std::snprintf(progress_buffer, sizeof(progress_buffer), "%d%%", progress);
-  set_label_text_if_changed(progress_label_, progress_buffer);
-  const std::string status_text = lifecycle_label(snapshot);
+    LvglLockGuard::note_phase("labels");
+    char progress_buffer[8] = {};
+    std::string status_text = current_operation_text(snapshot);
+    const int displayed_progress =
+        (!status_text.empty() && snapshot.current_layer == 0) ? 0 : progress;
+    std::snprintf(progress_buffer, sizeof(progress_buffer), "%d%%", displayed_progress);
+    set_label_text_if_changed(progress_label_, progress_buffer);
+    if (status_text.empty()) {
+      status_text = lifecycle_label(snapshot);
+    }
   set_label_text_if_changed(status_label_, status_text);
 
   const std::string detail = detail_text(snapshot);
@@ -1936,10 +2076,15 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     last_diag_status_ = status_text;
     last_diag_detail_ = detail;
     last_diag_stage_ = snapshot.stage;
-    ESP_LOGI(kTag, "[DIAG] display: status=%s stage=%s detail=%.60s lifecycle=%s",
-             status_text.c_str(), snapshot.stage.c_str(),
-             detail.empty() ? "(-)" : detail.c_str(),
-             to_string(snapshot.lifecycle));
+      ESP_LOGI(kTag, "[DIAG] display: status=%s ui=%s raw_status=%s raw_stage=%s stage=%s "
+                      "detail=%.60s lifecycle=%s",
+               status_text.c_str(),
+               snapshot.ui_status.empty() ? "(-)" : snapshot.ui_status.c_str(),
+               snapshot.raw_status.empty() ? "(-)" : snapshot.raw_status.c_str(),
+               snapshot.raw_stage.empty() ? "(-)" : snapshot.raw_stage.c_str(),
+               snapshot.stage.c_str(),
+               detail.empty() ? "(-)" : detail.c_str(),
+               to_string(snapshot.lifecycle));
   }
   detail_visible_ = !detail.empty();
   if (detail_visible_) {

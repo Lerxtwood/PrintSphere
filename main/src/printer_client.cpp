@@ -628,6 +628,136 @@ std::string json_string_local(const cJSON* object, const char* key,
   return item->valuestring;
 }
 
+bool key_matches_any_local(const char* key, std::initializer_list<const char*> keys) {
+  if (key == nullptr) {
+    return false;
+  }
+  for (const char* candidate : keys) {
+    if (candidate != nullptr && std::strcmp(key, candidate) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool find_stage_string_recursive_local(const cJSON* node, std::string* value, int depth = 0) {
+  if (node == nullptr || value == nullptr || depth > 10) {
+    return false;
+  }
+  if (cJSON_IsObject(node)) {
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (key_matches_any_local(child->string,
+                                {"current_stage", "currentStage", "stage_name", "stageName",
+                                 "print_stage", "printStage", "task_stage", "taskStage",
+                                 "sub_stage", "subStage", "phase", "step"}) &&
+          cJSON_IsString(child) && child->valuestring != nullptr && child->valuestring[0] != '\0') {
+        *value = child->valuestring;
+        return true;
+      }
+    }
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (find_stage_string_recursive_local(child, value, depth + 1)) {
+        return true;
+      }
+    }
+  } else if (cJSON_IsArray(node)) {
+    const int count = cJSON_GetArraySize(node);
+    for (int i = 0; i < count; ++i) {
+      if (find_stage_string_recursive_local(cJSON_GetArrayItem(node, i), value, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool known_operation_stage_string_local(const std::string& value) {
+  std::string lower = value;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return lower.find("homing") != std::string::npos ||
+         lower.find("foreign_object") != std::string::npos ||
+         lower.find("foreign object") != std::string::npos ||
+         lower.find("object_detection") != std::string::npos ||
+         lower.find("object detection") != std::string::npos ||
+         lower.find("heatbed_surface") != std::string::npos ||
+         lower.find("headbed_surface") != std::string::npos ||
+         lower.find("bed_surface") != std::string::npos ||
+         lower.find("hotend_type") != std::string::npos ||
+         lower.find("hotend type") != std::string::npos ||
+         lower.find("hotend_pick") != std::string::npos ||
+         lower.find("changing_filament") != std::string::npos ||
+         lower.find("changing filament") != std::string::npos ||
+         lower.find("calibrating") != std::string::npos ||
+         lower.find("cleaning_nozzle") != std::string::npos ||
+         lower.find("cleaning nozzle") != std::string::npos ||
+         lower.find("waiting_for_heatbed") != std::string::npos;
+}
+
+bool find_known_operation_string_recursive_local(const cJSON* node, std::string* value,
+                                                 int depth = 0) {
+  if (node == nullptr || value == nullptr || depth > 10) {
+    return false;
+  }
+  if (cJSON_IsString(node) && node->valuestring != nullptr && node->valuestring[0] != '\0') {
+    const std::string candidate(node->valuestring);
+    if (known_operation_stage_string_local(candidate)) {
+      *value = candidate;
+      return true;
+    }
+  }
+  if (cJSON_IsObject(node)) {
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (find_known_operation_string_recursive_local(child, value, depth + 1)) {
+        return true;
+      }
+    }
+  } else if (cJSON_IsArray(node)) {
+    const int count = cJSON_GetArraySize(node);
+    for (int i = 0; i < count; ++i) {
+      if (find_known_operation_string_recursive_local(cJSON_GetArrayItem(node, i), value,
+                                                     depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool find_stage_id_recursive_local(const cJSON* node, int* value, int depth = 0) {
+  if (node == nullptr || value == nullptr || depth > 10) {
+    return false;
+  }
+  if (cJSON_IsObject(node)) {
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (key_matches_any_local(child->string,
+                                {"stg_cur", "stage_id", "stageId", "stage_idx", "stageIdx",
+                                 "current_stage_id", "currentStageId", "print_stage_id",
+                                 "printStageId", "task_stage_id", "taskStageId"}) &&
+          cJSON_IsNumber(child)) {
+        const int candidate = child->valueint;
+        if (candidate != 0 && candidate != -1 && candidate != 255) {
+          *value = candidate;
+          return true;
+        }
+      }
+    }
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (find_stage_id_recursive_local(child, value, depth + 1)) {
+        return true;
+      }
+    }
+  } else if (cJSON_IsArray(node)) {
+    const int count = cJSON_GetArraySize(node);
+    for (int i = 0; i < count; ++i) {
+      if (find_stage_id_recursive_local(cJSON_GetArrayItem(node, i), value, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 const cJSON* child_object_local(const cJSON* object, const char* key) {
   if (object == nullptr || key == nullptr) {
     return nullptr;
@@ -1764,11 +1894,31 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     const std::string gcode_state = json_string(print, "gcode_state", {});
     const std::string effective_gcode_state = !gcode_state.empty() ? gcode_state : previous_raw_status;
     const cJSON* stage = cJSON_GetObjectItemCaseSensitive(print, "stage");
-    const int stage_id =
-        cJSON_IsObject(stage) ? json_int(stage, "_id", json_int(print, "stg_cur", -1))
-                              : json_int(print, "stg_cur", -1);
-    const std::string stage_name =
-        cJSON_IsObject(stage) ? json_string(stage, "name", json_string(stage, "stage", {})) : "";
+      int stage_id =
+          cJSON_IsObject(stage) ? json_int(stage, "_id", json_int(print, "stg_cur", -1))
+                                : json_int(print, "stg_cur", -1);
+      std::string stage_name =
+          cJSON_IsObject(stage) ? json_string(stage, "name", json_string(stage, "stage", {})) : "";
+      if (stage_id == 0 || stage_id == -1 || stage_id == 255) {
+        int recursive_stage_id = -1;
+        if (find_stage_id_recursive_local(print, &recursive_stage_id) &&
+            recursive_stage_id != 0 && recursive_stage_id != -1 && recursive_stage_id != 255) {
+          stage_id = recursive_stage_id;
+        }
+      }
+      if (is_placeholder_stage_name(stage_name)) {
+        std::string recursive_stage_name;
+        if (find_stage_string_recursive_local(print, &recursive_stage_name) &&
+            !is_placeholder_stage_name(recursive_stage_name)) {
+          stage_name = recursive_stage_name;
+        }
+      }
+      if (is_placeholder_stage_name(stage_name) || lower_copy(stage_name) == "printing") {
+        std::string known_operation_stage;
+        if (find_known_operation_string_recursive_local(print, &known_operation_stage)) {
+          stage_name = known_operation_stage;
+        }
+      }
     const cJSON* ams_obj = cJSON_GetObjectItemCaseSensitive(print, "ams");
     const bool has_hw_switch_state_update =
         cJSON_GetObjectItemCaseSensitive(print, "hw_switch_state") != nullptr;

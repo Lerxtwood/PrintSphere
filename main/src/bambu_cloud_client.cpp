@@ -945,6 +945,124 @@ bool find_int_for_keys_recursive(const cJSON* node, std::initializer_list<const 
   return false;
 }
 
+bool find_string_for_keys_recursive(const cJSON* node, std::initializer_list<const char*> keys,
+                                    std::string* value, int depth = 0) {
+  if (node == nullptr || value == nullptr || depth > 12) {
+    return false;
+  }
+  if (cJSON_IsObject(node)) {
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (key_matches_any(child->string, keys) &&
+          cJSON_IsString(child) && child->valuestring != nullptr && child->valuestring[0] != '\0') {
+        *value = child->valuestring;
+        return true;
+      }
+    }
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (find_string_for_keys_recursive(child, keys, value, depth + 1)) {
+        return true;
+      }
+    }
+  } else if (cJSON_IsArray(node)) {
+    const int count_items = cJSON_GetArraySize(node);
+    for (int i = 0; i < count_items; ++i) {
+      if (find_string_for_keys_recursive(cJSON_GetArrayItem(node, i), keys, value, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool find_stage_id_recursive(const cJSON* node, int* value, int depth = 0) {
+  if (node == nullptr || value == nullptr || depth > 12) {
+    return false;
+  }
+  if (cJSON_IsObject(node)) {
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (key_matches_any(child->string,
+                          {"stg_cur", "stage_id", "stageId", "stage_idx", "stageIdx",
+                           "current_stage_id", "currentStageId", "print_stage_id",
+                           "printStageId", "task_stage_id", "taskStageId"}) &&
+          cJSON_IsNumber(child)) {
+        const int candidate = child->valueint;
+        if (candidate != 0 && candidate != -1 && candidate != 255) {
+          *value = candidate;
+          return true;
+        }
+      }
+    }
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (find_stage_id_recursive(child, value, depth + 1)) {
+        return true;
+      }
+    }
+  } else if (cJSON_IsArray(node)) {
+    const int count_items = cJSON_GetArraySize(node);
+    for (int i = 0; i < count_items; ++i) {
+      if (find_stage_id_recursive(cJSON_GetArrayItem(node, i), value, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+std::string lower_stage_copy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return value;
+}
+
+bool known_operation_stage_string(const std::string& value) {
+  const std::string lower = lower_stage_copy(value);
+  return lower.find("homing") != std::string::npos ||
+         lower.find("foreign_object") != std::string::npos ||
+         lower.find("foreign object") != std::string::npos ||
+         lower.find("object_detection") != std::string::npos ||
+         lower.find("object detection") != std::string::npos ||
+         lower.find("heatbed_surface") != std::string::npos ||
+         lower.find("headbed_surface") != std::string::npos ||
+         lower.find("bed_surface") != std::string::npos ||
+         lower.find("hotend_type") != std::string::npos ||
+         lower.find("hotend type") != std::string::npos ||
+         lower.find("hotend_pick") != std::string::npos ||
+         lower.find("changing_filament") != std::string::npos ||
+         lower.find("changing filament") != std::string::npos ||
+         lower.find("calibrating") != std::string::npos ||
+         lower.find("cleaning_nozzle") != std::string::npos ||
+         lower.find("cleaning nozzle") != std::string::npos ||
+         lower.find("waiting_for_heatbed") != std::string::npos;
+}
+
+bool find_known_operation_string_recursive(const cJSON* node, std::string* value, int depth = 0) {
+  if (node == nullptr || value == nullptr || depth > 12) {
+    return false;
+  }
+  if (cJSON_IsString(node) && node->valuestring != nullptr && node->valuestring[0] != '\0') {
+    const std::string candidate(node->valuestring);
+    if (known_operation_stage_string(candidate)) {
+      *value = candidate;
+      return true;
+    }
+  }
+  if (cJSON_IsObject(node)) {
+    for (const cJSON* child = node->child; child != nullptr; child = child->next) {
+      if (find_known_operation_string_recursive(child, value, depth + 1)) {
+        return true;
+      }
+    }
+  } else if (cJSON_IsArray(node)) {
+    const int count_items = cJSON_GetArraySize(node);
+    for (int i = 0; i < count_items; ++i) {
+      if (find_known_operation_string_recursive(cJSON_GetArrayItem(node, i), value, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 int count_hms_entries(const cJSON* item) {
   if (item == nullptr) {
     return 0;
@@ -1215,9 +1333,9 @@ bool extract_live_status_text(const cJSON* item, std::string* value) {
   const cJSON* item_print = child_object_local(item, "print");
   const char* keys[] = {"gcode_state", "status", "task_status", "taskStatus",
                         "print_status", "printStatus", "state"};
-  for (const cJSON* source : {item, item_print}) {
-    if (source == nullptr) {
-      continue;
+    for (const cJSON* source : {item, item_print}) {
+      if (source == nullptr) {
+        continue;
     }
     for (const char* key : keys) {
       const std::string candidate = json_string_local(source, key, {});
@@ -1255,12 +1373,18 @@ bool extract_live_stage_text(const cJSON* item, std::string* value) {
         json_string_local(stage, "name", json_string_local(stage, "stage", {}));
     if (!stage_name.empty()) {
       *value = stage_name;
-      return true;
+        return true;
+      }
     }
-  }
 
-  return false;
-}
+    return find_string_for_keys_recursive(
+        item,
+        {"current_stage", "currentStage", "stage_name", "stageName",
+         "print_stage", "printStage", "task_stage", "taskStage",
+         "sub_stage", "subStage", "phase", "step"},
+        value);
+  
+  }
 
 struct CloudLiveProgressPercent {
   bool has_value = false;
@@ -2887,11 +3011,26 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
       copy_text(&runtime.resolved_serial, resolved_serial);
     }
 
-    std::string status_text;
-    extract_live_status_text(print, &status_text);
-    std::string stage_text;
-    extract_live_stage_text(print, &stage_text);
-    const bool has_status_update = !status_text.empty() || !stage_text.empty();
+      std::string status_text;
+      extract_live_status_text(print, &status_text);
+      std::string stage_text;
+      extract_live_stage_text(print, &stage_text);
+      if (stage_text.empty() || stage_text == "printing" || stage_text == "Printing") {
+        int recursive_stage_id = -1;
+        if (find_stage_id_recursive(print, &recursive_stage_id)) {
+          const std::string stage_from_id = bambu_stage_label_from_id(recursive_stage_id);
+          if (!stage_from_id.empty()) {
+            stage_text = stage_from_id;
+          }
+        }
+      }
+      if (stage_text.empty() || stage_text == "printing" || stage_text == "Printing") {
+        std::string known_operation_stage;
+        if (find_known_operation_string_recursive(print, &known_operation_stage)) {
+          stage_text = known_operation_stage;
+        }
+      }
+      const bool has_status_update = !status_text.empty() || !stage_text.empty();
     if (cloud_payload_probe_logs_remaining_.load() > 0) {
       const cJSON* ams_obj = cJSON_GetObjectItemCaseSensitive(print, "ams");
       const cJSON* ams_array =
@@ -5218,13 +5357,23 @@ std::string BambuCloudClient::extract_stage_text(const cJSON* item) {
     const cJSON* stage = child_object(source, "stage");
     const std::string stage_name =
         json_string(stage, "name", json_string(stage, "stage", {}));
-    if (!stage_name.empty()) {
-      return stage_name;
+      if (!stage_name.empty()) {
+        return stage_name;
+      }
     }
-  }
+  
+    std::string recursive_stage;
+    if (find_string_for_keys_recursive(
+            item,
+            {"current_stage", "currentStage", "stage_name", "stageName",
+             "print_stage", "printStage", "task_stage", "taskStage",
+             "sub_stage", "subStage", "phase", "step"},
+            &recursive_stage)) {
+      return recursive_stage;
+    }
 
-  return {};
-}
+    return {};
+  }
 
 std::string BambuCloudClient::extract_print_type_text(const cJSON* item) {
   if (item == nullptr) {

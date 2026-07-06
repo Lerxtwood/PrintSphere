@@ -4,7 +4,7 @@ set(IDF_TARGET "esp32s3")
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(PRINTSPHERE_RELEASE_VERSION "2.0.3" CACHE STRING "PrintSphere release version")
+set(PRINTSPHERE_RELEASE_VERSION "2.0.4" CACHE STRING "PrintSphere release version")
 set(PROJECT_VER "${PRINTSPHERE_RELEASE_VERSION}")
 set(PRINTSPHERE_HW_VARIANT "lcd_2_8c" CACHE STRING
     "PrintSphere hardware variant: lcd_2_8c or amoled_1_75")
