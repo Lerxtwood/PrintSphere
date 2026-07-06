@@ -231,6 +231,7 @@ class Ui {
   lv_obj_t* nozzle_aux_label_ = nullptr;
   lv_obj_t* bed_prefix_label_ = nullptr;
   lv_obj_t* bed_value_label_ = nullptr;
+  lv_obj_t* chamber_prefix_icon_ = nullptr;
   lv_obj_t* bed_aux_label_ = nullptr;
   lv_obj_t* remaining_prefix_label_ = nullptr;
   lv_obj_t* remaining_label_ = nullptr;

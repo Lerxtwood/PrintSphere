@@ -2188,11 +2188,11 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
   set_label_text_if_changed(bed_value_label_, temp_buffer);
 
-  const std::string bed_aux =
-      optional_temperature_text("Chamber", snapshot.chamber_temp_c, snapshot.chamber_temp_known);
-  bed_aux_visible_ = !bed_aux.empty();
+  bed_aux_visible_ = snapshot.chamber_temp_known || snapshot.chamber_temp_c > 0.0f;
   if (bed_aux_visible_) {
-    set_label_text_if_changed(bed_aux_label_, bed_aux);
+    std::snprintf(temp_buffer, sizeof(temp_buffer), "%.0f%s", snapshot.chamber_temp_c, kDegreeC);
+    set_label_text_if_changed(bed_aux_label_, temp_buffer);
+    lv_obj_set_style_text_color(bed_aux_label_, lv_color_hex(0xFFFFFF), 0);
   }
 
   const std::string battery_icon = battery_icon_text(snapshot);
@@ -3263,7 +3263,7 @@ esp_err_t Ui::build_dashboard() {
   set_label_text_if_changed(bed_prefix_label_, kMdiBed);
   lv_obj_set_style_text_font(bed_prefix_label_, mdi40, 0);
   lv_obj_set_style_text_color(bed_prefix_label_, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_align(bed_prefix_label_, LV_ALIGN_CENTER, 182, -10);
+  lv_obj_align(bed_prefix_label_, LV_ALIGN_CENTER, 182, -28);
 
   bed_value_label_ = lv_label_create(page1_);
   set_label_text_if_changed(bed_value_label_, "--°C");
@@ -3271,17 +3271,43 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_set_style_text_color(bed_value_label_, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_width(bed_value_label_, 96);
   lv_obj_set_style_text_align(bed_value_label_, LV_TEXT_ALIGN_RIGHT, 0);
-  lv_obj_align(bed_value_label_, LV_ALIGN_CENTER, 108, -10);
+  lv_obj_align(bed_value_label_, LV_ALIGN_CENTER, 108, -28);
   set_label_text_if_changed(bed_value_label_, std::string("--") + kDegreeC);
+
+  chamber_prefix_icon_ = lv_obj_create(page1_);
+  lv_obj_remove_style_all(chamber_prefix_icon_);
+  lv_obj_set_size(chamber_prefix_icon_, 26, 26);
+  lv_obj_set_style_bg_opa(chamber_prefix_icon_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(chamber_prefix_icon_, 2, 0);
+  lv_obj_set_style_border_color(chamber_prefix_icon_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_radius(chamber_prefix_icon_, 2, 0);
+  lv_obj_remove_flag(chamber_prefix_icon_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_align(chamber_prefix_icon_, LV_ALIGN_CENTER, 182, 8);
+
+  lv_obj_t* chamber_slot_top = lv_obj_create(chamber_prefix_icon_);
+  lv_obj_remove_style_all(chamber_slot_top);
+  lv_obj_set_size(chamber_slot_top, 10, 2);
+  lv_obj_set_style_bg_opa(chamber_slot_top, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(chamber_slot_top, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_radius(chamber_slot_top, 1, 0);
+  lv_obj_align(chamber_slot_top, LV_ALIGN_CENTER, 0, -5);
+
+  lv_obj_t* chamber_slot_bottom = lv_obj_create(chamber_prefix_icon_);
+  lv_obj_remove_style_all(chamber_slot_bottom);
+  lv_obj_set_size(chamber_slot_bottom, 10, 2);
+  lv_obj_set_style_bg_opa(chamber_slot_bottom, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(chamber_slot_bottom, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_radius(chamber_slot_bottom, 1, 0);
+  lv_obj_align(chamber_slot_bottom, LV_ALIGN_CENTER, 0, 5);
+  lv_obj_add_flag(chamber_prefix_icon_, LV_OBJ_FLAG_HIDDEN);
 
   bed_aux_label_ = lv_label_create(page1_);
   set_label_text_if_changed(bed_aux_label_, "");
-  lv_obj_set_width(bed_aux_label_, 170);
-  lv_label_set_long_mode(bed_aux_label_, LV_LABEL_LONG_WRAP);
-  lv_obj_set_style_text_align(bed_aux_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_font(bed_aux_label_, dosis20, 0);
-  lv_obj_set_style_text_color(bed_aux_label_, lv_color_hex(0x94A3B8), 0);
-  lv_obj_align(bed_aux_label_, LV_ALIGN_CENTER, 132, kAuxTempRowY);
+  lv_obj_set_width(bed_aux_label_, 96);
+  lv_obj_set_style_text_align(bed_aux_label_, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_set_style_text_font(bed_aux_label_, dosis32, 0);
+  lv_obj_set_style_text_color(bed_aux_label_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_align(bed_aux_label_, LV_ALIGN_CENTER, 108, 8);
   lv_obj_add_flag(bed_aux_label_, LV_OBJ_FLAG_HIDDEN);
 
   remaining_row_ = lv_obj_create(page1_);
@@ -3527,6 +3553,7 @@ void Ui::apply_page_visibility() {
   set_hidden(nozzle_aux_label_, !on_page1 || !nozzle_aux_visible_);
   set_hidden(bed_prefix_label_, !on_page1);
   set_hidden(bed_value_label_, !on_page1);
+  set_hidden(chamber_prefix_icon_, !on_page1 || !bed_aux_visible_);
   set_hidden(bed_aux_label_, !on_page1 || !bed_aux_visible_);
   set_hidden(remaining_row_, !on_page1);
   set_hidden(badge_slot_, !on_page1);
