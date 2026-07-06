@@ -220,8 +220,14 @@ class Ui {
   lv_obj_t* badge_slot_ = nullptr;
   lv_obj_t* logo_badge_ = nullptr;
   lv_obj_t* logo_image_ = nullptr;
+  lv_obj_t* status_art_badge_ = nullptr;
+  lv_obj_t* status_art_icon_label_ = nullptr;
+  lv_obj_t* status_art_dot_ = nullptr;
   lv_obj_t* status_label_ = nullptr;
   lv_obj_t* detail_label_ = nullptr;
+  lv_obj_t* layer_progress_row_ = nullptr;
+  lv_obj_t* layer_progress_label_ = nullptr;
+  lv_obj_t* layer_progress_bar_ = nullptr;
   lv_obj_t* layer_label_ = nullptr;
   lv_obj_t* layer_row_ = nullptr;
   lv_obj_t* filament_icon_label_ = nullptr;
@@ -265,6 +271,7 @@ class Ui {
   bool scrolling_ = false;
   bool deferred_snapshot_pending_ = false;
   bool detail_visible_ = true;
+  bool layer_progress_visible_ = false;
   bool show_logo_ = false;
   bool accent_initialized_ = false;
   bool preview_page_available_ = true;
@@ -298,6 +305,9 @@ class Ui {
   uint32_t last_ring_indicator_hex_ = UINT32_MAX;
   uint32_t last_ring_text_hex_ = UINT32_MAX;
   uint32_t last_rendered_ams_signature_ = UINT32_MAX;
+  uint16_t layer_progress_layer_ = 0;
+  uint64_t layer_progress_started_ms_ = 0;
+  uint32_t layer_progress_observed_duration_s_ = 0;
   std::atomic<uint32_t> last_activity_tick_ms_{0};
   ScreenPowerMode screen_power_mode_ = ScreenPowerMode::kAwake;
   std::string last_ui_status_;
@@ -316,8 +326,10 @@ class Ui {
   uint16_t last_camera_height_ = 0;
   bool logo_clickable_ = false;
   bool logo_preview_active_ = false;
+  bool status_art_visible_ = false;
   bool logo_recolor_enabled_ = false;
   uint32_t logo_recolor_hex_ = 0;
+  std::string last_status_art_key_;
   bool portal_lock_enabled_ = true;
   bool portal_request_authorized_ = false;
   bool portal_session_active_ = false;

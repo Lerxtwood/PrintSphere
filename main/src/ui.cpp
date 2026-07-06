@@ -1159,6 +1159,58 @@ std::string layer_text(const PrinterSnapshot& snapshot) {
   return std::string(buffer);
 }
 
+bool can_show_layer_progress(const PrinterSnapshot& snapshot) {
+  return snapshot.total_layers > 0 && snapshot.current_layer > 0 &&
+         snapshot.current_layer <= snapshot.total_layers;
+}
+
+uint32_t estimated_layer_duration_s(const PrinterSnapshot& snapshot,
+                                    uint32_t observed_duration_s) {
+  if (!can_show_layer_progress(snapshot)) {
+    return observed_duration_s > 0U ? observed_duration_s : 120U;
+  }
+  uint32_t estimate = 120U;
+  const uint16_t remaining_layers =
+      static_cast<uint16_t>(snapshot.total_layers - snapshot.current_layer + 1U);
+  if (snapshot.remaining_seconds > 0U && remaining_layers > 0U) {
+    // Bambu's remaining time tends to make the current layer estimate too
+    // optimistic on live prints. Bias longer so the bar doesn't hit 95% and
+    // sit there for a conspicuous chunk of every layer.
+    const uint32_t base = std::max<uint32_t>(1U, snapshot.remaining_seconds / remaining_layers);
+    estimate = std::clamp<uint32_t>((base * 160U) / 100U, 20U, 900U);
+  }
+  if (observed_duration_s > 0U) {
+    estimate = std::clamp<uint32_t>((estimate + observed_duration_s) / 2U, 20U, 900U);
+  }
+  return estimate;
+}
+
+int elapsed_layer_progress_percent(uint64_t layer_started_ms, uint32_t estimated_duration_s) {
+  if (layer_started_ms == 0U || estimated_duration_s == 0U) {
+    return 0;
+  }
+  const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
+  const uint64_t elapsed_ms = now_ms > layer_started_ms ? now_ms - layer_started_ms : 0U;
+  const uint64_t duration_ms = static_cast<uint64_t>(estimated_duration_s) * 1000ULL;
+  const int percent = duration_ms > 0U
+                          ? static_cast<int>((elapsed_ms * 100ULL) / duration_ms)
+                          : 0;
+  // Cap below 100 until the printer actually reports the next layer. This avoids
+  // the previous "stuck full-green" lie on longer-than-estimated layers.
+  return std::clamp(percent, 0, 99);
+}
+
+bool estimated_layer_progress_percent(const PrinterSnapshot& snapshot, uint64_t layer_started_ms,
+                                      uint32_t observed_duration_s, int* percent) {
+  if (percent == nullptr || !can_show_layer_progress(snapshot)) {
+    return false;
+  }
+  *percent =
+      elapsed_layer_progress_percent(layer_started_ms,
+                                     estimated_layer_duration_s(snapshot, observed_duration_s));
+  return true;
+}
+
 // Format the slicer filament weight estimate as a compact "14g" / "1.45kg"
 // string. Returned empty when no estimate is available so the caller can
 // hide the dedicated icon + value labels in the layer row.
@@ -1385,6 +1437,71 @@ bool should_show_logo(const PrinterSnapshot& snapshot) {
     default:
       return true;
   }
+}
+
+struct StatusArtSpec {
+  const char* key = "";
+  const char* icon = kMdiSync;
+  uint32_t bg_hex = 0x12312A;
+  uint32_t accent_hex = 0x2FF28A;
+};
+
+bool status_art_for_operation(const std::string& operation, StatusArtSpec* spec) {
+  if (operation.empty() || spec == nullptr) {
+    return false;
+  }
+  const std::string op = lower_ui_text(operation);
+  auto set = [&](const char* key, const char* icon, uint32_t bg, uint32_t accent) {
+    spec->key = key;
+    spec->icon = icon;
+    spec->bg_hex = bg;
+    spec->accent_hex = accent;
+    return true;
+  };
+
+  if (ui_text_contains(op, "download")) {
+    return set("download", kMdiSync, 0x14315F, 0x4DA3FF);
+  }
+  if (ui_text_contains(op, "chamber")) {
+    return set("chamber", kMdiBed, 0x4A2415, 0xFFB454);
+  }
+  if (ui_text_contains(op, "bed") || ui_text_contains(op, "surface") ||
+      ui_text_contains(op, "plate")) {
+    return set("bed", kMdiBed, 0x3D2A11, 0xFFC857);
+  }
+  if (ui_text_contains(op, "nozzle") || ui_text_contains(op, "hotend") ||
+      ui_text_contains(op, "extruder")) {
+    return set("nozzle", kMdiNozzle, 0x4A1D1D, 0xFF6B6B);
+  }
+  if (ui_text_contains(op, "filament") || ui_text_contains(op, "material")) {
+    return set("filament", kMdiSpool, 0x2E214A, 0xB87CFF);
+  }
+  if (ui_text_contains(op, "homing")) {
+    return set("homing", kMdiSync, 0x123A3C, 0x43E6E8);
+  }
+  if (ui_text_contains(op, "calibrat") || ui_text_contains(op, "level")) {
+    return set("calibrate", kMdiSync, 0x173318, 0x6DFF7C);
+  }
+  if (ui_text_contains(op, "checking") || ui_text_contains(op, "detecting") ||
+      ui_text_contains(op, "identifying") || ui_text_contains(op, "preparing")) {
+    return set("check", kMdiSync, 0x182A3D, 0x87CEEB);
+  }
+  return false;
+}
+
+bool should_show_status_art(const PrinterSnapshot& snapshot, const std::string& operation,
+                            StatusArtSpec* spec) {
+  if (snapshot.lifecycle == PrintLifecycleState::kPrinting && snapshot.current_layer > 0) {
+    return false;
+  }
+  const std::string status = lower_ui_text(snapshot.ui_status);
+  const bool pre_print =
+      snapshot.lifecycle == PrintLifecycleState::kPreparing ||
+      status == "downloading" || status == "preheating" || status == "preparing" ||
+      status == "clean nozzle" || status == "bed level" ||
+      status == "loading" || status == "unloading" ||
+      (snapshot.print_active && snapshot.current_layer == 0 && snapshot.progress_percent < 10.0f);
+  return pre_print && status_art_for_operation(operation, spec);
 }
 
 // Micro-interaction: uniform scale on card tap (256 = 100% in LVGL 9)
@@ -2089,19 +2206,50 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   LvglLockGuard::note_phase("ring_visual");
   apply_ring_visual_locked(snapshot);
 
-    LvglLockGuard::note_phase("labels");
-    char progress_buffer[8] = {};
-    std::string status_text = current_operation_text(snapshot);
-    const int displayed_progress =
-        (!status_text.empty() && snapshot.current_layer == 0) ? 0 : progress;
-    std::snprintf(progress_buffer, sizeof(progress_buffer), "%d%%", displayed_progress);
-    set_label_text_if_changed(progress_label_, progress_buffer);
-    if (status_text.empty()) {
-      status_text = lifecycle_label(snapshot);
-    }
+  LvglLockGuard::note_phase("labels");
+  char progress_buffer[8] = {};
+  const std::string operation_text = current_operation_text(snapshot);
+  std::string status_text = operation_text;
+  const int displayed_progress =
+      (!operation_text.empty() && snapshot.current_layer == 0) ? 0 : progress;
+  std::snprintf(progress_buffer, sizeof(progress_buffer), "%d%%", displayed_progress);
+  set_label_text_if_changed(progress_label_, progress_buffer);
+  if (status_text.empty()) {
+    status_text = lifecycle_label(snapshot);
+  }
   set_label_text_if_changed(status_label_, status_text);
 
-  const std::string detail = detail_text(snapshot);
+  int layer_progress = 0;
+  const bool layer_progress_candidate =
+      snapshot.lifecycle == PrintLifecycleState::kPrinting && !snapshot.has_error &&
+      can_show_layer_progress(snapshot);
+  if (layer_progress_candidate) {
+    if (layer_progress_layer_ != snapshot.current_layer || layer_progress_started_ms_ == 0U) {
+      const uint64_t now_ms = static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
+      if (layer_progress_layer_ > 0 && layer_progress_started_ms_ > 0U &&
+          snapshot.current_layer > layer_progress_layer_) {
+        const uint32_t completed_duration_s =
+            static_cast<uint32_t>((now_ms - layer_progress_started_ms_) / 1000ULL);
+        if (completed_duration_s >= 5U && completed_duration_s <= 900U) {
+          layer_progress_observed_duration_s_ =
+              layer_progress_observed_duration_s_ == 0U
+                  ? completed_duration_s
+                  : ((layer_progress_observed_duration_s_ * 3U) + completed_duration_s) / 4U;
+        }
+      }
+      layer_progress_layer_ = snapshot.current_layer;
+      layer_progress_started_ms_ = now_ms;
+    }
+  } else {
+    layer_progress_layer_ = 0;
+    layer_progress_started_ms_ = 0;
+    layer_progress_observed_duration_s_ = 0;
+  }
+  const bool show_layer_progress =
+      layer_progress_candidate &&
+      estimated_layer_progress_percent(snapshot, layer_progress_started_ms_,
+                                       layer_progress_observed_duration_s_, &layer_progress);
+  const std::string detail = show_layer_progress ? std::string{} : detail_text(snapshot);
 
   // [DIAG] Log what the display is actually showing — on change only.
   if (status_text != last_diag_status_ || detail != last_diag_detail_ ||
@@ -2120,6 +2268,14 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
                to_string(snapshot.lifecycle));
   }
   detail_visible_ = !detail.empty();
+  layer_progress_visible_ = show_layer_progress;
+  if (layer_progress_visible_) {
+    char layer_progress_text[32] = {};
+    std::snprintf(layer_progress_text, sizeof(layer_progress_text), "Layer progress %d%%",
+                  layer_progress);
+    set_label_text_if_changed(layer_progress_label_, layer_progress_text);
+    lv_bar_set_value(layer_progress_bar_, layer_progress, LV_ANIM_ON);
+  }
   if (detail_visible_) {
     // Scroll long error / HMS messages so the full TSV-resolved text is
     // readable on the narrow label.  Warnings (HMS codes without `has_error`)
@@ -2415,10 +2571,21 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
 
   show_logo_ = should_show_logo(snapshot);
+  StatusArtSpec status_art{};
+  const bool use_status_art =
+      show_logo_ && should_show_status_art(snapshot, operation_text, &status_art);
+  const bool actively_printing =
+      snapshot.lifecycle == PrintLifecycleState::kPrinting &&
+      (snapshot.current_layer > 0 || snapshot.progress_percent >= 1.0f);
   const bool use_preview_logo =
-      snapshot.print_active && has_preview_image && last_preview_raw_ && !last_preview_raw_->empty();
+      actively_printing && has_preview_image && last_preview_raw_ && !last_preview_raw_->empty();
   if (logo_image_ != nullptr) {
     if (use_preview_logo) {
+      if (status_art_visible_) {
+        set_hidden(status_art_badge_, true);
+        status_art_visible_ = false;
+      }
+      set_hidden(logo_image_, false);
       if (!logo_preview_active_) {
         lv_image_set_src(logo_image_, &preview_image_dsc_);
         const uint16_t max_dim =
@@ -2428,10 +2595,31 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
         lv_obj_set_style_image_recolor_opa(logo_image_, LV_OPA_TRANSP, 0);
         logo_preview_active_ = true;
       }
-    } else if (logo_preview_active_) {
-      lv_image_set_src(logo_image_, &bambuicon_small);
-      lv_image_set_scale(logo_image_, 183);
-      logo_preview_active_ = false;
+    } else {
+      if (logo_preview_active_) {
+        lv_image_set_src(logo_image_, &bambuicon_small);
+        lv_image_set_scale(logo_image_, 183);
+        logo_preview_active_ = false;
+      }
+      if (use_status_art && status_art_badge_ != nullptr) {
+        if (!status_art_visible_ || last_status_art_key_ != status_art.key) {
+          lv_obj_set_style_bg_color(status_art_badge_, lv_color_hex(status_art.bg_hex), 0);
+          lv_obj_set_style_border_color(status_art_badge_, lv_color_hex(status_art.accent_hex), 0);
+          lv_obj_set_style_bg_color(status_art_dot_, lv_color_hex(status_art.accent_hex), 0);
+          set_label_text_if_changed(status_art_icon_label_, status_art.icon);
+          last_status_art_key_ = status_art.key;
+        }
+        set_hidden(status_art_badge_, false);
+        set_hidden(logo_image_, true);
+        status_art_visible_ = true;
+      } else {
+        if (status_art_visible_) {
+          set_hidden(status_art_badge_, true);
+          status_art_visible_ = false;
+          last_status_art_key_.clear();
+        }
+        set_hidden(logo_image_, false);
+      }
     }
   }
   const bool chamber_light_clickable = snapshot.chamber_light_supported;
@@ -2441,8 +2629,8 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
 
   const bool logo_recolor_enabled =
-      !logo_preview_active_ && snapshot.chamber_light_supported && snapshot.chamber_light_state_known &&
-      !snapshot.chamber_light_on;
+      !logo_preview_active_ && !status_art_visible_ && snapshot.chamber_light_supported &&
+      snapshot.chamber_light_state_known && !snapshot.chamber_light_on;
   const uint32_t logo_recolor_hex = logo_recolor_enabled ? 0x7A7A7A : 0U;
   if (logo_recolor_enabled != logo_recolor_enabled_ ||
       (logo_recolor_enabled && logo_recolor_hex != logo_recolor_hex_)) {
@@ -3212,6 +3400,35 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_clear_flag(logo_image_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_clear_flag(logo_image_, LV_OBJ_FLAG_SCROLLABLE);
 
+  status_art_badge_ = lv_obj_create(logo_badge_);
+  lv_obj_set_size(status_art_badge_, 82, 82);
+  lv_obj_set_style_radius(status_art_badge_, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(status_art_badge_, lv_color_hex(0x12312A), 0);
+  lv_obj_set_style_bg_opa(status_art_badge_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(status_art_badge_, lv_color_hex(0x2FF28A), 0);
+  lv_obj_set_style_border_opa(status_art_badge_, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(status_art_badge_, 2, 0);
+  lv_obj_set_style_pad_all(status_art_badge_, 0, 0);
+  lv_obj_center(status_art_badge_);
+  lv_obj_clear_flag(status_art_badge_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(status_art_badge_, LV_OBJ_FLAG_SCROLLABLE);
+
+  status_art_icon_label_ = lv_label_create(status_art_badge_);
+  set_label_text_if_changed(status_art_icon_label_, kMdiSync);
+  lv_obj_set_style_text_font(status_art_icon_label_, mdi40, 0);
+  lv_obj_set_style_text_color(status_art_icon_label_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_center(status_art_icon_label_);
+
+  status_art_dot_ = lv_obj_create(status_art_badge_);
+  lv_obj_set_size(status_art_dot_, 12, 12);
+  lv_obj_set_style_radius(status_art_dot_, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(status_art_dot_, lv_color_hex(0x2FF28A), 0);
+  lv_obj_set_style_bg_opa(status_art_dot_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_opa(status_art_dot_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_all(status_art_dot_, 0, 0);
+  lv_obj_align(status_art_dot_, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_obj_add_flag(status_art_badge_, LV_OBJ_FLAG_HIDDEN);
+
   status_label_ = lv_label_create(page1_);
   set_label_text_if_changed(status_label_, "waiting...");
   lv_obj_set_style_text_font(status_label_, dosis32, 0);
@@ -3226,6 +3443,33 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_set_style_text_font(detail_label_, info20, 0);
   lv_obj_set_style_text_color(detail_label_, lv_color_hex(0x94A3B8), 0);
   lv_obj_align(detail_label_, LV_ALIGN_CENTER, 0, 114);
+
+  layer_progress_row_ = lv_obj_create(page1_);
+  make_transparent(layer_progress_row_);
+  lv_obj_set_size(layer_progress_row_, 240, 34);
+  lv_obj_set_style_pad_all(layer_progress_row_, 0, 0);
+  lv_obj_align(layer_progress_row_, LV_ALIGN_CENTER, 0, 112);
+  lv_obj_clear_flag(layer_progress_row_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(layer_progress_row_, LV_OBJ_FLAG_HIDDEN);
+
+  layer_progress_label_ = lv_label_create(layer_progress_row_);
+  set_label_text_if_changed(layer_progress_label_, "Layer progress --%");
+  lv_obj_set_style_text_font(layer_progress_label_, info20, 0);
+  lv_obj_set_style_text_color(layer_progress_label_, lv_color_hex(0x94A3B8), 0);
+  lv_obj_set_style_text_align(layer_progress_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(layer_progress_label_, LV_ALIGN_TOP_MID, 0, -2);
+
+  layer_progress_bar_ = lv_bar_create(layer_progress_row_);
+  lv_obj_set_size(layer_progress_bar_, 210, 9);
+  lv_obj_align(layer_progress_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_bar_set_range(layer_progress_bar_, 0, 100);
+  lv_bar_set_value(layer_progress_bar_, 0, LV_ANIM_OFF);
+  lv_obj_set_style_radius(layer_progress_bar_, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_radius(layer_progress_bar_, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(layer_progress_bar_, lv_color_hex(0x163027), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(layer_progress_bar_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(layer_progress_bar_, lv_color_hex(0x2FF28A), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(layer_progress_bar_, LV_OPA_COVER, LV_PART_INDICATOR);
 
   layer_row_ = lv_obj_create(page1_);
   make_transparent(layer_row_);
@@ -3566,7 +3810,7 @@ void Ui::apply_page_visibility() {
   const bool portal_hint_has_priority = portal_pin_active_ || portal_session_active_;
   const bool show_portal_hint =
       settled_page1 && !portal_hint_text_.empty() &&
-      (portal_hint_has_priority || !detail_visible_);
+      (portal_hint_has_priority || (!detail_visible_ && !layer_progress_visible_));
 
   for (int u = 0; u < kMaxAmsPageSlots; ++u) {
     if (ams_pages_[u] != nullptr) {
@@ -3577,6 +3821,7 @@ void Ui::apply_page_visibility() {
   set_hidden(page3_, !camera_page_available_);
   set_hidden(status_label_, !on_page1);
   set_hidden(detail_label_, !on_page1 || !detail_visible_ || show_portal_hint);
+  set_hidden(layer_progress_row_, !on_page1 || !layer_progress_visible_ || show_portal_hint);
   set_hidden(layer_row_, !on_page1);
   set_hidden(nozzle_prefix_label_, !on_page1);
   set_hidden(nozzle_value_label_, !on_page1);
@@ -4024,13 +4269,17 @@ void Ui::update_portal_access_visuals_locked() {
   const bool show_page1 = !scrolling_ && active_page_ == kPageIdxMain;
   const bool portal_hint_has_priority = portal_pin_active_ || portal_session_active_;
   const bool show_hint = portal_hint_label_ != nullptr && show_page1 && !portal_hint_text_.empty() &&
-                         (portal_hint_has_priority || !detail_visible_);
+                         (portal_hint_has_priority || (!detail_visible_ && !layer_progress_visible_));
   set_hidden(portal_hint_label_, !show_hint);
   if (show_hint) {
     set_label_text_if_changed(portal_hint_label_, portal_hint_text_);
     set_hidden(detail_label_, true);
+    set_hidden(layer_progress_row_, true);
   } else if (detail_label_ != nullptr && show_page1 && detail_visible_) {
     set_hidden(detail_label_, false);
+  }
+  if (!show_hint && layer_progress_row_ != nullptr) {
+    set_hidden(layer_progress_row_, !show_page1 || !layer_progress_visible_);
   }
 
   const bool show_overlay = portal_overlay_card_ != nullptr && portal_pin_active_;
