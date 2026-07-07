@@ -69,6 +69,10 @@ class PrinterClient {
     float chamber_target_temp_c = 0.0f;
     float secondary_nozzle_temp_c = 0.0f;
     float secondary_nozzle_target_temp_c = 0.0f;
+    float right_nozzle_temp_c = 0.0f;
+    float right_nozzle_target_temp_c = 0.0f;
+    float left_nozzle_temp_c = 0.0f;
+    float left_nozzle_target_temp_c = 0.0f;
     bool chamber_light_supported = false;
     bool chamber_light_state_known = false;
     bool chamber_light_on = false;

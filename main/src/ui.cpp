@@ -2333,18 +2333,29 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
 
   LvglLockGuard::note_phase("temps");
   char temp_buffer[24] = {};
-  const bool is_dual_nozzle = snapshot.active_nozzle_index >= 0;
+  const bool physical_right_nozzle_known =
+      snapshot.right_nozzle_temp_known || snapshot.right_nozzle_temp_c > 0.0f;
+  const bool physical_left_nozzle_known =
+      snapshot.left_nozzle_temp_known || snapshot.left_nozzle_temp_c > 0.0f;
+  const bool is_dual_nozzle =
+      snapshot.active_nozzle_index >= 0 || physical_right_nozzle_known || physical_left_nozzle_known;
   const bool active_nozzle_known = snapshot.nozzle_temp_known || snapshot.nozzle_temp_c > 0.0f;
   const bool secondary_nozzle_known =
       snapshot.secondary_nozzle_temp_known || snapshot.secondary_nozzle_temp_c > 0.0f;
   if (is_dual_nozzle) {
     const bool active_is_left = snapshot.active_nozzle_index == 1;
-    const float left_temp =
+    const float mapped_left_temp =
         active_is_left ? snapshot.nozzle_temp_c : snapshot.secondary_nozzle_temp_c;
-    const bool left_known = active_is_left ? active_nozzle_known : secondary_nozzle_known;
-    const float right_temp =
+    const bool mapped_left_known = active_is_left ? active_nozzle_known : secondary_nozzle_known;
+    const float mapped_right_temp =
         active_is_left ? snapshot.secondary_nozzle_temp_c : snapshot.nozzle_temp_c;
-    const bool right_known = active_is_left ? secondary_nozzle_known : active_nozzle_known;
+    const bool mapped_right_known = active_is_left ? secondary_nozzle_known : active_nozzle_known;
+    const float left_temp =
+        physical_left_nozzle_known ? snapshot.left_nozzle_temp_c : mapped_left_temp;
+    const bool left_known = physical_left_nozzle_known || mapped_left_known;
+    const float right_temp =
+        physical_right_nozzle_known ? snapshot.right_nozzle_temp_c : mapped_right_temp;
+    const bool right_known = physical_right_nozzle_known || mapped_right_known;
 
     lv_obj_set_style_text_font(nozzle_value_label_, &dosis_32, 0);
     lv_obj_set_style_text_font(nozzle_aux_label_, &dosis_32, 0);

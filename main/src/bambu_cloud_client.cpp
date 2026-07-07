@@ -1329,6 +1329,14 @@ struct NozzleTemperatureBundle {
   bool secondary_present = false;
   bool active_target_present = false;
   bool secondary_target_present = false;
+  float right = 0.0f;
+  float left = 0.0f;
+  float right_target = 0.0f;
+  float left_target = 0.0f;
+  bool right_present = false;
+  bool left_present = false;
+  bool right_target_present = false;
+  bool left_target_present = false;
   int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
 };
 
@@ -1566,11 +1574,18 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
                                   float* active_temp, bool* active_present,
                                   float* secondary_temp, bool* secondary_present,
                                   float* active_target, bool* active_target_present,
-                                  float* secondary_target, bool* secondary_target_present) {
+                                  float* secondary_target, bool* secondary_target_present,
+                                  float* right_temp, bool* right_present,
+                                  float* left_temp, bool* left_present,
+                                  float* right_target, bool* right_target_present,
+                                  float* left_target, bool* left_target_present) {
   if (!cJSON_IsArray(info_array) || active_temp == nullptr || active_present == nullptr ||
       secondary_temp == nullptr || secondary_present == nullptr ||
       active_target == nullptr || active_target_present == nullptr ||
-      secondary_target == nullptr || secondary_target_present == nullptr) {
+      secondary_target == nullptr || secondary_target_present == nullptr ||
+      right_temp == nullptr || right_present == nullptr || left_temp == nullptr ||
+      left_present == nullptr || right_target == nullptr || right_target_present == nullptr ||
+      left_target == nullptr || left_target_present == nullptr) {
     return;
   }
 
@@ -1600,6 +1615,22 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
     }
 
     const int id = json_int_local(item, "id", -1);
+    if (id == 0) {
+      *right_temp = temp;
+      *right_present = true;
+      if (target > -999.0f) {
+        *right_target = target;
+        *right_target_present = true;
+      }
+    } else if (id == 1) {
+      *left_temp = temp;
+      *left_present = true;
+      if (target > -999.0f) {
+        *left_target = target;
+        *left_target_present = true;
+      }
+    }
+
     if (id == active_nozzle_index) {
       *active_temp = temp;
       *active_present = true;
@@ -1673,12 +1704,20 @@ NozzleTemperatureBundle extract_cloud_nozzle_temperature_bundle(const cJSON* ite
                                  merge_index, &bundle.active, &bundle.active_present,
                                  &bundle.secondary, &bundle.secondary_present,
                                  &bundle.active_target, &bundle.active_target_present,
-                                 &bundle.secondary_target, &bundle.secondary_target_present);
+                                 &bundle.secondary_target, &bundle.secondary_target_present,
+                                 &bundle.right, &bundle.right_present,
+                                 &bundle.left, &bundle.left_present,
+                                 &bundle.right_target, &bundle.right_target_present,
+                                 &bundle.left_target, &bundle.left_target_present);
     merge_nozzle_temp_candidates(child_array_local(child_object_local(device, "extruder"), "info"),
                                  merge_index, &bundle.active, &bundle.active_present,
                                  &bundle.secondary, &bundle.secondary_present,
                                  &bundle.active_target, &bundle.active_target_present,
-                                 &bundle.secondary_target, &bundle.secondary_target_present);
+                                 &bundle.secondary_target, &bundle.secondary_target_present,
+                                 &bundle.right, &bundle.right_present,
+                                 &bundle.left, &bundle.left_present,
+                                 &bundle.right_target, &bundle.right_target_present,
+                                 &bundle.left_target, &bundle.left_target_present);
   }
 
   if (bundle.active <= 0.0f) {
@@ -1715,6 +1754,29 @@ NozzleTemperatureBundle extract_cloud_nozzle_temperature_bundle(const cJSON* ite
       bundle.secondary = direct;
       bundle.secondary_present = true;
     }
+  }
+
+  if (bundle.active_nozzle_index == 0 && !bundle.right_present && bundle.active_present) {
+    bundle.right = bundle.active;
+    bundle.right_target = bundle.active_target;
+    bundle.right_present = true;
+    bundle.right_target_present = bundle.active_target_present;
+  } else if (bundle.active_nozzle_index == 1 && !bundle.left_present && bundle.active_present) {
+    bundle.left = bundle.active;
+    bundle.left_target = bundle.active_target;
+    bundle.left_present = true;
+    bundle.left_target_present = bundle.active_target_present;
+  }
+  if (bundle.active_nozzle_index == 0 && !bundle.left_present && bundle.secondary_present) {
+    bundle.left = bundle.secondary;
+    bundle.left_target = bundle.secondary_target;
+    bundle.left_present = true;
+    bundle.left_target_present = bundle.secondary_target_present;
+  } else if (bundle.active_nozzle_index == 1 && !bundle.right_present && bundle.secondary_present) {
+    bundle.right = bundle.secondary;
+    bundle.right_target = bundle.secondary_target;
+    bundle.right_present = true;
+    bundle.right_target_present = bundle.secondary_target_present;
   }
 
   return bundle;
@@ -2333,6 +2395,10 @@ void BambuCloudClient::apply_cloud_session_state(bool configured, bool connected
     live.chamber_temp_last_update_ms = 0;
     live.secondary_nozzle_temp_c = 0.0f;
     live.secondary_nozzle_temp_last_update_ms = 0;
+    live.right_nozzle_temp_c = 0.0f;
+    live.right_nozzle_temp_last_update_ms = 0;
+    live.left_nozzle_temp_c = 0.0f;
+    live.left_nozzle_temp_last_update_ms = 0;
     live.non_error_stop = false;
     live.remaining_seconds = 0;
     live.current_layer = 0;
@@ -2487,6 +2553,18 @@ void BambuCloudClient::publish_combined_snapshot() {
     current.secondary_nozzle_temp_c = live.secondary_nozzle_temp_c;
     current.secondary_nozzle_target_temp_c = live.secondary_nozzle_target_temp_c;
     current.secondary_nozzle_temp_last_update_ms = live.secondary_nozzle_temp_last_update_ms;
+  }
+  if (live_has_recent_state &&
+      (live.right_nozzle_temp_last_update_ms != 0 || live.right_nozzle_temp_c > 0.0f)) {
+    current.right_nozzle_temp_c = live.right_nozzle_temp_c;
+    current.right_nozzle_target_temp_c = live.right_nozzle_target_temp_c;
+    current.right_nozzle_temp_last_update_ms = live.right_nozzle_temp_last_update_ms;
+  }
+  if (live_has_recent_state &&
+      (live.left_nozzle_temp_last_update_ms != 0 || live.left_nozzle_temp_c > 0.0f)) {
+    current.left_nozzle_temp_c = live.left_nozzle_temp_c;
+    current.left_nozzle_target_temp_c = live.left_nozzle_target_temp_c;
+    current.left_nozzle_temp_last_update_ms = live.left_nozzle_temp_last_update_ms;
   }
   if (live_has_recent_state && (live.bed_temp_last_update_ms != 0 || live.bed_temp_c > 0.0f)) {
     current.bed_temp_c = live.bed_temp_c;
@@ -3286,6 +3364,10 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
     runtime.secondary_nozzle_temp_c = nozzle_temps.secondary;
     runtime.nozzle_target_temp_c = nozzle_temps.active_target;
     runtime.secondary_nozzle_target_temp_c = nozzle_temps.secondary_target;
+    runtime.right_nozzle_temp_c = nozzle_temps.right;
+    runtime.right_nozzle_target_temp_c = nozzle_temps.right_target;
+    runtime.left_nozzle_temp_c = nozzle_temps.left;
+    runtime.left_nozzle_target_temp_c = nozzle_temps.left_target;
     if (nozzle_temps.active_nozzle_index >= 0) {
       runtime.active_nozzle_index = nozzle_temps.active_nozzle_index;
     }
@@ -3304,6 +3386,12 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
     }
     if (nozzle_temps.secondary_target_present) {
       runtime.secondary_nozzle_temp_last_update_ms = runtime.last_update_ms;
+    }
+    if (nozzle_temps.right_present || nozzle_temps.right_target_present) {
+      runtime.right_nozzle_temp_last_update_ms = runtime.last_update_ms;
+    }
+    if (nozzle_temps.left_present || nozzle_temps.left_target_present) {
+      runtime.left_nozzle_temp_last_update_ms = runtime.last_update_ms;
     }
     if (bed_temp.present) {
       runtime.bed_temp_last_update_ms = runtime.last_update_ms;

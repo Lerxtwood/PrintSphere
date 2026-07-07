@@ -948,6 +948,10 @@ struct NozzleTemperatureBundle {
   float secondary = 0.0f;
   float active_target = 0.0f;
   float secondary_target = 0.0f;
+  float right = 0.0f;
+  float left = 0.0f;
+  float right_target = 0.0f;
+  float left_target = 0.0f;
   int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
 };
 
@@ -961,9 +965,12 @@ int extract_active_nozzle_index(const cJSON* device) {
 
 void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_index,
                                   float* active_temp, float* secondary_temp,
-                                  float* active_target, float* secondary_target) {
+                                  float* active_target, float* secondary_target,
+                                  float* right_temp, float* left_temp,
+                                  float* right_target, float* left_target) {
   if (!cJSON_IsArray(info_array) || active_temp == nullptr || secondary_temp == nullptr ||
-      active_target == nullptr || secondary_target == nullptr) {
+      active_target == nullptr || secondary_target == nullptr || right_temp == nullptr ||
+      left_temp == nullptr || right_target == nullptr || left_target == nullptr) {
     return;
   }
 
@@ -984,10 +991,18 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
                                       json_number_local(item, "target",
                                       json_number_local(item, "tar", -1000.0f)))));
     const int id = json_int_local(item, "id", -1);
-    ESP_LOGI(kTag, "[DBG] nozzle info[%d]: id=%d temp=%.1f (raw int=%d)",
-             i, id, temp, (int)temp);
+    ESP_LOGD(kTag, "[nozzle] info[%d]: id=%d temp=%.1f target=%.1f",
+             i, id, temp, target);
     if (temp <= -999.0f) {
       continue;
+    }
+
+    if (id == 0) {
+      *right_temp = temp;
+      if (target > -999.0f) *right_target = target;
+    } else if (id == 1) {
+      *left_temp = temp;
+      if (target > -999.0f) *left_target = target;
     }
 
     if (first_temp < -999.0f) {
@@ -1128,12 +1143,30 @@ NozzleTemperatureBundle extract_nozzle_temperature_bundle(const cJSON* print, fl
   const int merge_index = active_nozzle_index >= 0 ? active_nozzle_index : 0;
   merge_nozzle_temp_candidates(child_array_local(child_object_local(device, "nozzle"), "info"),
                                merge_index, &bundle.active, &bundle.secondary,
-                               &bundle.active_target, &bundle.secondary_target);
+                               &bundle.active_target, &bundle.secondary_target,
+                               &bundle.right, &bundle.left,
+                               &bundle.right_target, &bundle.left_target);
   merge_nozzle_temp_candidates(child_array_local(extruder, "info"), merge_index,
                                &bundle.active, &bundle.secondary,
-                               &bundle.active_target, &bundle.secondary_target);
-  ESP_LOGD(kTag, "[DBG] nozzle bundle final: active=%.1f secondary=%.1f active_nozzle_idx=%d",
-           bundle.active, bundle.secondary, active_nozzle_index);
+                               &bundle.active_target, &bundle.secondary_target,
+                               &bundle.right, &bundle.left,
+                               &bundle.right_target, &bundle.left_target);
+  if (active_nozzle_index == 0 && bundle.right <= 0.0f) {
+    bundle.right = bundle.active;
+    bundle.right_target = bundle.active_target;
+  } else if (active_nozzle_index == 1 && bundle.left <= 0.0f) {
+    bundle.left = bundle.active;
+    bundle.left_target = bundle.active_target;
+  }
+  if (active_nozzle_index == 0 && bundle.left <= 0.0f) {
+    bundle.left = bundle.secondary;
+    bundle.left_target = bundle.secondary_target;
+  } else if (active_nozzle_index == 1 && bundle.right <= 0.0f) {
+    bundle.right = bundle.secondary;
+    bundle.right_target = bundle.secondary_target;
+  }
+  ESP_LOGD(kTag, "[nozzle] bundle active=%.1f secondary=%.1f right=%.1f left=%.1f active_idx=%d",
+           bundle.active, bundle.secondary, bundle.right, bundle.left, active_nozzle_index);
   return bundle;
 }
 
@@ -1594,6 +1627,14 @@ PrinterSnapshot PrinterClient::build_snapshot_from_runtime(
   snapshot.secondary_nozzle_temp_known = runtime.secondary_nozzle_temp_c > 0.0f;
   snapshot.secondary_nozzle_target_temp_c = runtime.secondary_nozzle_target_temp_c;
   snapshot.secondary_nozzle_target_temp_known = runtime.secondary_nozzle_target_temp_c > 0.0f;
+  snapshot.right_nozzle_temp_c = runtime.right_nozzle_temp_c;
+  snapshot.right_nozzle_temp_known = runtime.right_nozzle_temp_c > 0.0f;
+  snapshot.right_nozzle_target_temp_c = runtime.right_nozzle_target_temp_c;
+  snapshot.right_nozzle_target_temp_known = runtime.right_nozzle_target_temp_c > 0.0f;
+  snapshot.left_nozzle_temp_c = runtime.left_nozzle_temp_c;
+  snapshot.left_nozzle_temp_known = runtime.left_nozzle_temp_c > 0.0f;
+  snapshot.left_nozzle_target_temp_c = runtime.left_nozzle_target_temp_c;
+  snapshot.left_nozzle_target_temp_known = runtime.left_nozzle_target_temp_c > 0.0f;
   snapshot.active_nozzle_index = runtime.active_nozzle_index;
   snapshot.chamber_light_supported = runtime.chamber_light_supported;
   snapshot.chamber_light_state_known = runtime.chamber_light_state_known;
@@ -2113,6 +2154,10 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     runtime.secondary_nozzle_temp_c = nozzle_temps.secondary;
     runtime.nozzle_target_temp_c = nozzle_temps.active_target;
     runtime.secondary_nozzle_target_temp_c = nozzle_temps.secondary_target;
+    runtime.right_nozzle_temp_c = nozzle_temps.right;
+    runtime.right_nozzle_target_temp_c = nozzle_temps.right_target;
+    runtime.left_nozzle_temp_c = nozzle_temps.left;
+    runtime.left_nozzle_target_temp_c = nozzle_temps.left_target;
     if (nozzle_temps.active_nozzle_index >= 0) {
       runtime.active_nozzle_index = nozzle_temps.active_nozzle_index;
     }

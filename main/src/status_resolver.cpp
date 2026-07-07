@@ -348,7 +348,9 @@ StatusSourceAdapter make_cloud_source_adapter(const BambuCloudSnapshot& snapshot
       (cloud_temperature_known(snapshot.nozzle_temp_last_update_ms, snapshot.connected) ||
        cloud_temperature_known(snapshot.bed_temp_last_update_ms, snapshot.connected) ||
        cloud_temperature_known(snapshot.chamber_temp_last_update_ms, snapshot.connected) ||
-       cloud_temperature_known(snapshot.secondary_nozzle_temp_last_update_ms, snapshot.connected));
+       cloud_temperature_known(snapshot.secondary_nozzle_temp_last_update_ms, snapshot.connected) ||
+       cloud_temperature_known(snapshot.right_nozzle_temp_last_update_ms, snapshot.connected) ||
+       cloud_temperature_known(snapshot.left_nozzle_temp_last_update_ms, snapshot.connected));
   adapter.light_usable =
       adapter.fresh && snapshot.chamber_light_supported && snapshot.chamber_light_state_known;
   adapter.error_usable =
@@ -569,6 +571,20 @@ void apply_local_temperature_bundle(PrinterSnapshot& target, const PrinterSnapsh
   target.secondary_nozzle_target_temp_known =
       local_snapshot.secondary_nozzle_target_temp_known ||
       local_snapshot.secondary_nozzle_target_temp_c > 0.0f;
+  target.right_nozzle_temp_c = local_snapshot.right_nozzle_temp_c;
+  target.right_nozzle_temp_known =
+      local_snapshot.right_nozzle_temp_known || local_snapshot.right_nozzle_temp_c > 0.0f;
+  target.right_nozzle_target_temp_c = local_snapshot.right_nozzle_target_temp_c;
+  target.right_nozzle_target_temp_known =
+      local_snapshot.right_nozzle_target_temp_known ||
+      local_snapshot.right_nozzle_target_temp_c > 0.0f;
+  target.left_nozzle_temp_c = local_snapshot.left_nozzle_temp_c;
+  target.left_nozzle_temp_known =
+      local_snapshot.left_nozzle_temp_known || local_snapshot.left_nozzle_temp_c > 0.0f;
+  target.left_nozzle_target_temp_c = local_snapshot.left_nozzle_target_temp_c;
+  target.left_nozzle_target_temp_known =
+      local_snapshot.left_nozzle_target_temp_known ||
+      local_snapshot.left_nozzle_target_temp_c > 0.0f;
   if (local_snapshot.active_nozzle_index >= 0) {
     target.active_nozzle_index = local_snapshot.active_nozzle_index;
   }
@@ -602,6 +618,22 @@ void apply_cloud_temperature_bundle(PrinterSnapshot& target, const BambuCloudSna
   target.secondary_nozzle_target_temp_c =
       target.secondary_nozzle_temp_known ? cloud_snapshot.secondary_nozzle_target_temp_c : 0.0f;
   target.secondary_nozzle_target_temp_known = target.secondary_nozzle_target_temp_c > 0.0f;
+  target.right_nozzle_temp_known =
+      cloud_temperature_known(cloud_snapshot.right_nozzle_temp_last_update_ms,
+                              cloud_snapshot.connected);
+  target.right_nozzle_temp_c =
+      target.right_nozzle_temp_known ? cloud_snapshot.right_nozzle_temp_c : 0.0f;
+  target.right_nozzle_target_temp_c =
+      target.right_nozzle_temp_known ? cloud_snapshot.right_nozzle_target_temp_c : 0.0f;
+  target.right_nozzle_target_temp_known = target.right_nozzle_target_temp_c > 0.0f;
+  target.left_nozzle_temp_known =
+      cloud_temperature_known(cloud_snapshot.left_nozzle_temp_last_update_ms,
+                              cloud_snapshot.connected);
+  target.left_nozzle_temp_c =
+      target.left_nozzle_temp_known ? cloud_snapshot.left_nozzle_temp_c : 0.0f;
+  target.left_nozzle_target_temp_c =
+      target.left_nozzle_temp_known ? cloud_snapshot.left_nozzle_target_temp_c : 0.0f;
+  target.left_nozzle_target_temp_known = target.left_nozzle_target_temp_c > 0.0f;
   if (cloud_snapshot.active_nozzle_index >= 0) {
     target.active_nozzle_index = cloud_snapshot.active_nozzle_index;
   }
@@ -1119,11 +1151,18 @@ PrinterSnapshot merge_status_sources(const PrinterSnapshot& local_snapshot, bool
       snapshot.chamber_temp_c = 0.0f;
       snapshot.chamber_temp_known = false;
     }
-    const bool live_dual_nozzle_signal = snapshot.active_nozzle_index >= 0;
+    const bool live_dual_nozzle_signal =
+        snapshot.active_nozzle_index >= 0 ||
+        snapshot.right_nozzle_temp_known || snapshot.right_nozzle_temp_c > 0.0f ||
+        snapshot.left_nozzle_temp_known || snapshot.left_nozzle_temp_c > 0.0f;
     if (!printer_model_has_secondary_nozzle_temperature(effective_model) &&
         !live_dual_nozzle_signal) {
       snapshot.secondary_nozzle_temp_c = 0.0f;
       snapshot.secondary_nozzle_temp_known = false;
+      snapshot.right_nozzle_temp_c = 0.0f;
+      snapshot.right_nozzle_temp_known = false;
+      snapshot.left_nozzle_temp_c = 0.0f;
+      snapshot.left_nozzle_temp_known = false;
     }
     if (!printer_model_has_chamber_light(effective_model)) {
       snapshot.chamber_light_supported = false;
