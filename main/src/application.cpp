@@ -331,6 +331,10 @@ void Application::run() {
   filament_anim_enabled_ = config_store_.load_filament_anim_enabled();
   audio_notifier_.set_enabled(config_store_.load_audio_enabled());
   audio_notifier_.set_volume_percent(config_store_.load_audio_volume_percent());
+  {
+    const QuietHoursConfig quiet = config_store_.load_quiet_hours();
+    audio_notifier_.set_quiet_hours(quiet.enabled, quiet.start_minute, quiet.end_minute);
+  }
 
   // Mount the LittleFS partition that holds custom sound files.
   // Must be done before loading PCM blobs below.

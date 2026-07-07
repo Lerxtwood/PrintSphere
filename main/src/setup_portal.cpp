@@ -354,6 +354,36 @@ std::string duration_text(uint32_t total_seconds) {
   return buffer;
 }
 
+std::string minute_to_time_input(uint16_t minute) {
+  minute = minute <= 1439U ? minute : 0U;
+  char buffer[6] = {};
+  std::snprintf(buffer, sizeof(buffer), "%02u:%02u",
+                static_cast<unsigned int>(minute / 60U),
+                static_cast<unsigned int>(minute % 60U));
+  return buffer;
+}
+
+bool parse_time_input_minutes(const std::string& input, uint16_t* minute) {
+  if (minute == nullptr) {
+    return false;
+  }
+  const std::string value = trim_copy(input);
+  if (value.size() != 5U || value[2] != ':' ||
+      !std::isdigit(static_cast<unsigned char>(value[0])) ||
+      !std::isdigit(static_cast<unsigned char>(value[1])) ||
+      !std::isdigit(static_cast<unsigned char>(value[3])) ||
+      !std::isdigit(static_cast<unsigned char>(value[4]))) {
+    return false;
+  }
+  const int hour = (value[0] - '0') * 10 + (value[1] - '0');
+  const int min = (value[3] - '0') * 10 + (value[4] - '0');
+  if (hour < 0 || hour > 23 || min < 0 || min > 59) {
+    return false;
+  }
+  *minute = static_cast<uint16_t>(hour * 60 + min);
+  return true;
+}
+
 std::string cookie_value(const std::string& header, const char* key) {
   if (key == nullptr || key[0] == '\0') {
     return {};
@@ -1391,6 +1421,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   const bool filament_anim = portal->config_store_.load_filament_anim_enabled();
   const bool audio_enabled_cfg = portal->config_store_.load_audio_enabled();
   const int audio_volume_cfg = portal->config_store_.load_audio_volume_percent();
+  const QuietHoursConfig quiet_cfg = portal->config_store_.load_quiet_hours();
   const PrinterProfile active_profile = portal->config_store_.load_active_printer_profile();
   const PrinterConnection printer = active_profile.to_connection();
   const ArcColorScheme arc_colors = portal->config_store_.load_arc_color_scheme();
@@ -2096,6 +2127,25 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
       html += "<input type=\"range\" id=\"audio_volume\" min=\"0\" max=\"100\" step=\"1\" value=\"";
       html += std::to_string(audio_volume_cfg);
       html += "\" oninput=\"document.getElementById('audio_volume_value').textContent=this.value+'%';\"></div>";
+      html += "<div class=\"field\"><label for=\"quiet_enabled\">Quiet Hours</label><select id=\"quiet_enabled\">";
+      html += "<option value=\"true\"";
+      if (quiet_cfg.enabled) {
+        html += " selected";
+      }
+      html += ">Enabled</option>";
+      html += "<option value=\"false\"";
+      if (!quiet_cfg.enabled) {
+        html += " selected";
+      }
+      html += ">Disabled</option></select>";
+      html += "<div class=\"micro\">Mutes normal notification sounds during local quiet hours. Test sounds still play.</div></div>";
+      html += "<div class=\"grid-2\"><div class=\"field\"><label for=\"quiet_start\">Quiet starts</label>";
+      html += "<input type=\"time\" id=\"quiet_start\" value=\"";
+      html += minute_to_time_input(quiet_cfg.start_minute);
+      html += "\"></div><div class=\"field\"><label for=\"quiet_end\">Sound resumes</label>";
+      html += "<input type=\"time\" id=\"quiet_end\" value=\"";
+      html += minute_to_time_input(quiet_cfg.end_minute);
+      html += "\"></div></div>";
       html += "<div class=\"actions\"><button type=\"button\" class=\"primary\" id=\"audio-apply-button\">Save</button>";
       html += "<button type=\"button\" id=\"audio-test-button\">Test sound</button>";
       html += "<div class=\"micro\" id=\"audio-apply-hint\">Applies live, no restart required.</div></div>";
@@ -2569,6 +2619,17 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += filament_wake ? "true" : "false";
   html += ",filament_anim:";
   html += filament_anim ? "true" : "false";
+  html += ",audio_enabled:";
+  html += audio_enabled_cfg ? "true" : "false";
+  html += ",audio_volume:";
+  html += std::to_string(audio_volume_cfg);
+  html += ",quiet_enabled:";
+  html += quiet_cfg.enabled ? "true" : "false";
+  html += ",quiet_start:\"";
+  html += minute_to_time_input(quiet_cfg.start_minute);
+  html += "\",quiet_end:\"";
+  html += minute_to_time_input(quiet_cfg.end_minute);
+  html += "\"";
   html += ",tz_iana:\"";
   html += json_escape(portal->config_store_.load_timezone_iana());
   html += "\"";
@@ -2891,6 +2952,9 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   // without restart so the button feedback is immediate.
   html += "{const audioEnabledSel=document.getElementById('audio_enabled');"
           "const audioVolumeRange=document.getElementById('audio_volume');"
+          "const quietEnabledSel=document.getElementById('quiet_enabled');"
+          "const quietStartInput=document.getElementById('quiet_start');"
+          "const quietEndInput=document.getElementById('quiet_end');"
           "const audioApply=document.getElementById('audio-apply-button');"
           "const audioTest=document.getElementById('audio-test-button');"
           "async function audioPost(payload){const response=await fetch('/api/audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
@@ -2898,16 +2962,23 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "if(audioApply){audioApply.addEventListener('click',async()=>{"
               "const audio_enabled=audioEnabledSel?audioEnabledSel.value==='true':true;"
               "const audio_volume=audioVolumeRange?Number(audioVolumeRange.value):60;"
+              "const quiet_enabled=quietEnabledSel?quietEnabledSel.value==='true':savedConfig.quiet_enabled!==false;"
+              "const quiet_start=quietStartInput?quietStartInput.value:(savedConfig.quiet_start||'21:00');"
+              "const quiet_end=quietEndInput?quietEndInput.value:(savedConfig.quiet_end||'08:00');"
               "audioApply.disabled=true;setStatus('Saving sound...','Applying notification sound settings.',4000);"
-              "const r=await audioPost({audio_enabled,audio_volume,test:false}).catch(()=>({ok:false,body:{}}));"
-              "if(r.ok){savedConfig.audio_enabled=audio_enabled;savedConfig.audio_volume=audio_volume;setStatus('Sound saved.','',2500);}"
+              "const r=await audioPost({audio_enabled,audio_volume,quiet_enabled,quiet_start,quiet_end,test:false}).catch(()=>({ok:false,body:{}}));"
+              "if(r.ok){savedConfig.audio_enabled=audio_enabled;savedConfig.audio_volume=audio_volume;"
+              "savedConfig.quiet_enabled=quiet_enabled;savedConfig.quiet_start=quiet_start;savedConfig.quiet_end=quiet_end;setStatus('Sound saved.','',2500);}"
               "else{setStatus(r.body.error||'Sound change failed','Sound settings could not be saved.',6000);}"
               "audioApply.disabled=false;});}"
           "if(audioTest){audioTest.addEventListener('click',async()=>{"
               "const audio_enabled=audioEnabledSel?audioEnabledSel.value==='true':true;"
               "const audio_volume=audioVolumeRange?Number(audioVolumeRange.value):60;"
+              "const quiet_enabled=quietEnabledSel?quietEnabledSel.value==='true':savedConfig.quiet_enabled!==false;"
+              "const quiet_start=quietStartInput?quietStartInput.value:(savedConfig.quiet_start||'21:00');"
+              "const quiet_end=quietEndInput?quietEndInput.value:(savedConfig.quiet_end||'08:00');"
               "audioTest.disabled=true;"
-              "await audioPost({audio_enabled,audio_volume,test:true}).catch(()=>{});"
+              "await audioPost({audio_enabled,audio_volume,quiet_enabled,quiet_start,quiet_end,test:true}).catch(()=>{});"
               "setTimeout(()=>{audioTest.disabled=false;},900);});}}";
   // Per-event audio customization JS
   html += "{const kEvCnt=8;"
@@ -3504,6 +3575,7 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   const PrinterConnection printer = portal->config_store_.load_active_printer_profile().to_connection();
   const ArcColorScheme arc_colors = portal->config_store_.load_arc_color_scheme();
   const BatteryDisplayPolicy bat_policy_get = portal->config_store_.load_battery_display_policy();
+  const QuietHoursConfig quiet_get = portal->config_store_.load_quiet_hours();
   const BambuCloudSnapshot cloud_snapshot = portal->cloud_client_.snapshot();
   const std::string effective_printer_serial = [&]() -> std::string {
     if (!printer.serial.empty()) return printer.serial;
@@ -3573,6 +3645,10 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   body += portal->config_store_.load_audio_enabled() ? "true" : "false";
   body += ",\"audio_volume\":";
   body += std::to_string(portal->config_store_.load_audio_volume_percent());
+  body += ",\"quiet_enabled\":";
+  body += quiet_get.enabled ? "true" : "false";
+  body += ",\"quiet_start\":\"" + minute_to_time_input(quiet_get.start_minute) + "\"";
+  body += ",\"quiet_end\":\"" + minute_to_time_input(quiet_get.end_minute) + "\"";
   body += ",\"tz_iana\":\"" + json_escape(portal->config_store_.load_timezone_iana()) + "\"";
   body += "}";
 
@@ -4033,6 +4109,30 @@ esp_err_t SetupPortal::handle_audio_post(httpd_req_t* request) {
       }
     }
   }
+  QuietHoursConfig quiet = portal->config_store_.load_quiet_hours();
+  quiet.enabled = read_bool_field(root, "quiet_enabled", quiet.enabled);
+  {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, "quiet_start");
+    if (cJSON_IsString(item) && item->valuestring != nullptr) {
+      uint16_t parsed = quiet.start_minute;
+      if (!parse_time_input_minutes(item->valuestring, &parsed)) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid quiet start time");
+      }
+      quiet.start_minute = parsed;
+    }
+  }
+  {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, "quiet_end");
+    if (cJSON_IsString(item) && item->valuestring != nullptr) {
+      uint16_t parsed = quiet.end_minute;
+      if (!parse_time_input_minutes(item->valuestring, &parsed)) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "invalid quiet end time");
+      }
+      quiet.end_minute = parsed;
+    }
+  }
   const bool play_test = read_bool_field(root, "test", false);
   int test_event_idx = -1;
   {
@@ -4052,10 +4152,13 @@ esp_err_t SetupPortal::handle_audio_post(httpd_req_t* request) {
                       "save audio enabled failed");
   ESP_RETURN_ON_ERROR(portal->config_store_.save_audio_volume_percent(audio_volume), kTag,
                       "save audio volume failed");
+  ESP_RETURN_ON_ERROR(portal->config_store_.save_quiet_hours(quiet), kTag,
+                      "save quiet hours failed");
 
   // Apply live without reboot — runtime-tunable.
   portal->audio_notifier_.set_enabled(audio_enabled);
   portal->audio_notifier_.set_volume_percent(audio_volume);
+  portal->audio_notifier_.set_quiet_hours(quiet.enabled, quiet.start_minute, quiet.end_minute);
   if (play_test) {
     portal->audio_notifier_.play_test();
   }

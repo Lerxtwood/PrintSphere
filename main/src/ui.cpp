@@ -1062,6 +1062,11 @@ std::string current_operation_text(const PrinterSnapshot& snapshot) {
   if (ui_text_contains(stage, "calibrating_extrusion")) return "Calibrating extrusion";
   if (ui_text_contains(stage, "calibrating_micro_lidar")) return "Calibrating lidar";
   if (ui_text_contains(stage, "calibrating_motor_noise")) return "Calibrating motor noise";
+  if (ui_text_contains(stage, "vibration") || ui_text_contains(stage, "compensation") ||
+      ui_text_contains(stage, "resonance") || ui_text_contains(stage, "input_shaping") ||
+      ui_text_contains(stage, "input shaping")) {
+    return "Vibration compensation";
+  }
   if (ui_text_contains(stage, "homing")) return "Homing toolhead";
   if (ui_text_contains(stage, "foreign_object") || ui_text_contains(stage, "foreign object") ||
       ui_text_contains(stage, "object_detection") || ui_text_contains(stage, "object detection") ||
@@ -1476,6 +1481,9 @@ bool status_art_for_operation(const std::string& operation, StatusArtSpec* spec)
   if (ui_text_contains(op, "filament") || ui_text_contains(op, "material")) {
     return set("filament", kMdiSpool, 0x2E214A, 0xB87CFF);
   }
+  if (ui_text_contains(op, "vibration") || ui_text_contains(op, "compensation")) {
+    return set("vibration", kMdiSync, 0x15334A, 0x54D4FF);
+  }
   if (ui_text_contains(op, "homing")) {
     return set("homing", kMdiSync, 0x123A3C, 0x43E6E8);
   }
@@ -1500,7 +1508,7 @@ bool should_show_status_art(const PrinterSnapshot& snapshot, const std::string& 
       status == "downloading" || status == "preheating" || status == "preparing" ||
       status == "clean nozzle" || status == "bed level" ||
       status == "loading" || status == "unloading" ||
-      (snapshot.print_active && snapshot.current_layer == 0 && snapshot.progress_percent < 10.0f);
+      (snapshot.print_active && snapshot.current_layer == 0);
   return pre_print && status_art_for_operation(operation, spec);
 }
 
@@ -2578,7 +2586,8 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
       snapshot.lifecycle == PrintLifecycleState::kPrinting &&
       (snapshot.current_layer > 0 || snapshot.progress_percent >= 1.0f);
   const bool use_preview_logo =
-      actively_printing && has_preview_image && last_preview_raw_ && !last_preview_raw_->empty();
+      actively_printing && !use_status_art && has_preview_image && last_preview_raw_ &&
+      !last_preview_raw_->empty();
   if (logo_image_ != nullptr) {
     if (use_preview_logo) {
       if (status_art_visible_) {

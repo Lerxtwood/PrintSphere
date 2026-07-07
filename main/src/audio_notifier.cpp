@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <vector>
 
@@ -185,6 +186,29 @@ bool custom_pcm_is_playable(const std::vector<int16_t>& samples) {
   return peak >= kMinCustomPcmPeak;
 }
 
+bool quiet_hours_active_now(bool enabled, int start_minute, int end_minute) {
+  if (!enabled) {
+    return false;
+  }
+  start_minute = std::clamp(start_minute, 0, 1439);
+  end_minute = std::clamp(end_minute, 0, 1439);
+  if (start_minute == end_minute) {
+    return false;
+  }
+
+  const std::time_t now = std::time(nullptr);
+  std::tm local = {};
+  if (now <= 0 || localtime_r(&now, &local) == nullptr || local.tm_year < 124) {
+    return false;
+  }
+
+  const int current_minute = local.tm_hour * 60 + local.tm_min;
+  if (start_minute < end_minute) {
+    return current_minute >= start_minute && current_minute < end_minute;
+  }
+  return current_minute >= start_minute || current_minute < end_minute;
+}
+
 void worker_task(void*) {
   std::vector<int16_t> render_buffer;
   render_buffer.reserve(kSampleRate / 2);  // up to 0.5 s notes
@@ -358,6 +382,11 @@ void AudioNotifier::play(Event event) {
   if (!enabled_.load(std::memory_order_relaxed)) {
     return;
   }
+  if (quiet_hours_active_now(quiet_enabled_.load(std::memory_order_relaxed),
+                             quiet_start_min_.load(std::memory_order_relaxed),
+                             quiet_end_min_.load(std::memory_order_relaxed))) {
+    return;
+  }
   if (g_queue == nullptr) {
     return;
   }
@@ -382,6 +411,12 @@ void AudioNotifier::set_enabled(bool enabled) {
 
 void AudioNotifier::set_volume_percent(int volume) {
   volume_pct_.store(std::clamp(volume, 0, 100), std::memory_order_relaxed);
+}
+
+void AudioNotifier::set_quiet_hours(bool enabled, uint16_t start_minute, uint16_t end_minute) {
+  quiet_enabled_.store(enabled, std::memory_order_relaxed);
+  quiet_start_min_.store(std::min<int>(start_minute, 1439), std::memory_order_relaxed);
+  quiet_end_min_.store(std::min<int>(end_minute, 1439), std::memory_order_relaxed);
 }
 
 void AudioNotifier::play_test_event(Event event) {

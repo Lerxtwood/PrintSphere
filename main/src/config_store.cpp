@@ -296,6 +296,27 @@ int ConfigStore::load_audio_volume_percent() const {
   return static_cast<int>(parsed);
 }
 
+QuietHoursConfig ConfigStore::load_quiet_hours() const {
+  QuietHoursConfig config;
+  config.enabled = parse_bool_or_default(load_string("quiet_en"), config.enabled);
+
+  const auto load_minute = [&](const char* key, uint16_t fallback) -> uint16_t {
+    const std::string s = load_string(key);
+    if (s.empty()) {
+      return fallback;
+    }
+    const long parsed = std::strtol(s.c_str(), nullptr, 10);
+    if (parsed < 0 || parsed > 1439) {
+      return fallback;
+    }
+    return static_cast<uint16_t>(parsed);
+  };
+
+  config.start_minute = load_minute("quiet_start", config.start_minute);
+  config.end_minute = load_minute("quiet_end", config.end_minute);
+  return config;
+}
+
 ArcColorScheme ConfigStore::load_arc_color_scheme() const {
   ArcColorScheme colors;
   colors.printing = parse_color_or_default(load_string("arc_print"), colors.printing);
@@ -402,6 +423,16 @@ esp_err_t ConfigStore::save_audio_volume_percent(int volume) const {
   if (volume < 0) volume = 0;
   if (volume > 100) volume = 100;
   return save_string("audio_vol", std::to_string(volume));
+}
+
+esp_err_t ConfigStore::save_quiet_hours(const QuietHoursConfig& config) const {
+  const uint16_t start = config.start_minute <= 1439U ? config.start_minute : 21U * 60U;
+  const uint16_t end = config.end_minute <= 1439U ? config.end_minute : 8U * 60U;
+  ESP_RETURN_ON_ERROR(save_string("quiet_en", config.enabled ? "1" : "0"), kTag,
+                      "save quiet enabled failed");
+  ESP_RETURN_ON_ERROR(save_string("quiet_start", std::to_string(start)), kTag,
+                      "save quiet start failed");
+  return save_string("quiet_end", std::to_string(end));
 }
 
 std::string ConfigStore::load_timezone_iana() const {

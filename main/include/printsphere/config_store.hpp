@@ -112,6 +112,12 @@ struct ArcColorScheme {
   uint32_t unknown = 0x888888;
 };
 
+struct QuietHoursConfig {
+  bool enabled = true;
+  uint16_t start_minute = 21U * 60U;
+  uint16_t end_minute = 8U * 60U;
+};
+
 class ConfigStore {
  public:
   esp_err_t initialize();
@@ -127,6 +133,7 @@ class ConfigStore {
   bool load_filament_anim_enabled() const;
   bool load_audio_enabled() const;
   int load_audio_volume_percent() const;
+  QuietHoursConfig load_quiet_hours() const;
   ArcColorScheme load_arc_color_scheme() const;
   BatteryDisplayPolicy load_battery_display_policy() const;
   // IANA timezone name (e.g. "Europe/Berlin"). Empty when never configured;
@@ -144,6 +151,7 @@ class ConfigStore {
   esp_err_t save_filament_anim_enabled(bool enabled) const;
   esp_err_t save_audio_enabled(bool enabled) const;
   esp_err_t save_audio_volume_percent(int volume) const;
+  esp_err_t save_quiet_hours(const QuietHoursConfig& config) const;
   esp_err_t save_timezone_iana(const std::string& iana_name) const;
   std::vector<PrinterProfile> load_printer_profiles() const;
   esp_err_t save_printer_profile(const PrinterProfile& profile) const;

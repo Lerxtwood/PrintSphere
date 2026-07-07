@@ -52,6 +52,10 @@ class AudioNotifier {
   void set_volume_percent(int volume);
   int volume_percent() const { return volume_pct_.load(std::memory_order_relaxed); }
 
+  // Quiet-hours gate for normal notification sounds. Test sounds intentionally
+  // bypass this via the worker's force flag.
+  void set_quiet_hours(bool enabled, uint16_t start_minute, uint16_t end_minute);
+
   // Plays a short test tone — used by the web portal "Test" button.
   void play_test();
 
@@ -75,6 +79,9 @@ class AudioNotifier {
  private:
   std::atomic<bool> enabled_{true};
   std::atomic<int> volume_pct_{60};
+  std::atomic<bool> quiet_enabled_{true};
+  std::atomic<int> quiet_start_min_{21 * 60};
+  std::atomic<int> quiet_end_min_{8 * 60};
   std::atomic<bool> initialized_{false};
   std::atomic<bool> event_enabled_[kEventCount];
   std::mutex pcm_mutex_;
