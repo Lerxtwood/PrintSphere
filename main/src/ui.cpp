@@ -30,6 +30,16 @@
 
 extern "C" {
 extern const lv_image_dsc_t bambuicon_small;
+extern const lv_image_dsc_t status_showcase_homing;
+extern const lv_image_dsc_t status_showcase_leveling_bed;
+extern const lv_image_dsc_t status_showcase_checking_surface;
+extern const lv_image_dsc_t status_showcase_detecting_hotend;
+extern const lv_image_dsc_t status_showcase_changing_filament;
+extern const lv_image_dsc_t status_showcase_heating_bed;
+extern const lv_image_dsc_t status_showcase_heating_chamber;
+extern const lv_image_dsc_t status_showcase_calibrating_flow;
+extern const lv_image_dsc_t status_showcase_cleaning_nozzle;
+extern const lv_image_dsc_t status_showcase_vibration;
 extern const lv_font_t dosis_20;
 extern const lv_font_t dosis_32;
 extern const lv_font_t dosis_40;
@@ -1174,6 +1184,12 @@ uint32_t estimated_layer_duration_s(const PrinterSnapshot& snapshot,
   if (!can_show_layer_progress(snapshot)) {
     return observed_duration_s > 0U ? observed_duration_s : 120U;
   }
+  if (observed_duration_s > 0U) {
+    // Once we have real layer transitions, trust the recent observed duration.
+    // Very short repeating layers (e.g. 8-12 s infill/support layers) are common,
+    // and the old 20 s floor made the progress bar top out around 40-50%.
+    return std::clamp<uint32_t>(observed_duration_s, 3U, 900U);
+  }
   uint32_t estimate = 120U;
   const uint16_t remaining_layers =
       static_cast<uint16_t>(snapshot.total_layers - snapshot.current_layer + 1U);
@@ -1182,10 +1198,7 @@ uint32_t estimated_layer_duration_s(const PrinterSnapshot& snapshot,
     // optimistic on live prints. Bias longer so the bar doesn't hit 95% and
     // sit there for a conspicuous chunk of every layer.
     const uint32_t base = std::max<uint32_t>(1U, snapshot.remaining_seconds / remaining_layers);
-    estimate = std::clamp<uint32_t>((base * 160U) / 100U, 20U, 900U);
-  }
-  if (observed_duration_s > 0U) {
-    estimate = std::clamp<uint32_t>((estimate + observed_duration_s) / 2U, 20U, 900U);
+    estimate = std::clamp<uint32_t>((base * 160U) / 100U, 3U, 900U);
   }
   return estimate;
 }
@@ -1451,6 +1464,23 @@ struct StatusArtSpec {
   uint32_t accent_hex = 0x2FF28A;
 };
 
+const lv_image_dsc_t* showcase_art_for_key(const char* key) {
+  if (key == nullptr) {
+    return nullptr;
+  }
+  if (std::strcmp(key, "homing") == 0) return &status_showcase_homing;
+  if (std::strcmp(key, "leveling_bed") == 0) return &status_showcase_leveling_bed;
+  if (std::strcmp(key, "checking_surface") == 0) return &status_showcase_checking_surface;
+  if (std::strcmp(key, "detecting_hotend") == 0) return &status_showcase_detecting_hotend;
+  if (std::strcmp(key, "changing_filament") == 0) return &status_showcase_changing_filament;
+  if (std::strcmp(key, "heating_bed") == 0) return &status_showcase_heating_bed;
+  if (std::strcmp(key, "heating_chamber") == 0) return &status_showcase_heating_chamber;
+  if (std::strcmp(key, "calibrating_flow") == 0) return &status_showcase_calibrating_flow;
+  if (std::strcmp(key, "cleaning_nozzle") == 0) return &status_showcase_cleaning_nozzle;
+  if (std::strcmp(key, "vibration") == 0) return &status_showcase_vibration;
+  return nullptr;
+}
+
 bool status_art_for_operation(const std::string& operation, StatusArtSpec* spec) {
   if (operation.empty() || spec == nullptr) {
     return false;
@@ -1464,35 +1494,55 @@ bool status_art_for_operation(const std::string& operation, StatusArtSpec* spec)
     return true;
   };
 
-  if (ui_text_contains(op, "download")) {
-    return set("download", kMdiSync, 0x14315F, 0x4DA3FF);
-  }
-  if (ui_text_contains(op, "chamber")) {
-    return set("chamber", kMdiBed, 0x4A2415, 0xFFB454);
-  }
-  if (ui_text_contains(op, "bed") || ui_text_contains(op, "surface") ||
-      ui_text_contains(op, "plate")) {
-    return set("bed", kMdiBed, 0x3D2A11, 0xFFC857);
-  }
-  if (ui_text_contains(op, "nozzle") || ui_text_contains(op, "hotend") ||
-      ui_text_contains(op, "extruder")) {
-    return set("nozzle", kMdiNozzle, 0x4A1D1D, 0xFF6B6B);
-  }
-  if (ui_text_contains(op, "filament") || ui_text_contains(op, "material")) {
-    return set("filament", kMdiSpool, 0x2E214A, 0xB87CFF);
-  }
   if (ui_text_contains(op, "vibration") || ui_text_contains(op, "compensation")) {
     return set("vibration", kMdiSync, 0x15334A, 0x54D4FF);
   }
   if (ui_text_contains(op, "homing")) {
     return set("homing", kMdiSync, 0x123A3C, 0x43E6E8);
   }
-  if (ui_text_contains(op, "calibrat") || ui_text_contains(op, "level")) {
-    return set("calibrate", kMdiSync, 0x173318, 0x6DFF7C);
+  if (ui_text_contains(op, "changing filament") || ui_text_contains(op, "filament") ||
+      ui_text_contains(op, "material")) {
+    return set("changing_filament", kMdiSpool, 0x2E214A, 0xB87CFF);
+  }
+  if (ui_text_contains(op, "chamber")) {
+    return set("heating_chamber", kMdiBed, 0x4A2415, 0xFFB454);
+  }
+  if (ui_text_contains(op, "heating bed") || ui_text_contains(op, "heatbed")) {
+    return set("heating_bed", kMdiBed, 0x3D2A11, 0xFFC857);
+  }
+  if (ui_text_contains(op, "cleaning nozzle") || ui_text_contains(op, "clean")) {
+    return set("cleaning_nozzle", kMdiNozzle, 0x123A3C, 0x43E6E8);
+  }
+  if (ui_text_contains(op, "foreign") || ui_text_contains(op, "surface") ||
+      ui_text_contains(op, "object detection") || ui_text_contains(op, "checking bed")) {
+    return set("checking_surface", kMdiSync, 0x182A3D, 0x87CEEB);
+  }
+  if (ui_text_contains(op, "hotend type") || ui_text_contains(op, "detecting hotend") ||
+      ui_text_contains(op, "checking extruder")) {
+    return set("detecting_hotend", kMdiNozzle, 0x4A1D1D, 0xFF6B6B);
+  }
+  if (ui_text_contains(op, "level")) {
+    return set("leveling_bed", kMdiBed, 0x173318, 0x6DFF7C);
+  }
+  if (ui_text_contains(op, "flow") || ui_text_contains(op, "extrusion") ||
+      ui_text_contains(op, "calibrat")) {
+    return set("calibrating_flow", kMdiSync, 0x173318, 0x6DFF7C);
+  }
+  if (ui_text_contains(op, "nozzle") || ui_text_contains(op, "hotend") ||
+      ui_text_contains(op, "extruder")) {
+    return set("detecting_hotend", kMdiNozzle, 0x4A1D1D, 0xFF6B6B);
+  }
+  if (ui_text_contains(op, "bed") || ui_text_contains(op, "plate")) {
+    return set("leveling_bed", kMdiBed, 0x3D2A11, 0xFFC857);
   }
   if (ui_text_contains(op, "checking") || ui_text_contains(op, "detecting") ||
       ui_text_contains(op, "identifying") || ui_text_contains(op, "preparing")) {
-    return set("check", kMdiSync, 0x182A3D, 0x87CEEB);
+    return set("checking_surface", kMdiSync, 0x182A3D, 0x87CEEB);
+  }
+  if (ui_text_contains(op, "download")) {
+    // Downloading is outside the ten Showcase prep states, but keeping it mapped
+    // avoids falling back to the logo during that early bootstrapping phase.
+    return set("checking_surface", kMdiSync, 0x14315F, 0x4DA3FF);
   }
   return false;
 }
@@ -1534,6 +1584,10 @@ void Ui::set_display_rotation(DisplayRotation rotation) {
     return;
   }
   display_rotation_ = rotation;
+}
+
+void Ui::set_status_icon_theme(StatusIconTheme theme) {
+  status_icon_theme_ = theme;
 }
 
 esp_err_t Ui::initialize() {
@@ -2238,11 +2292,18 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
           snapshot.current_layer > layer_progress_layer_) {
         const uint32_t completed_duration_s =
             static_cast<uint32_t>((now_ms - layer_progress_started_ms_) / 1000ULL);
-        if (completed_duration_s >= 5U && completed_duration_s <= 900U) {
-          layer_progress_observed_duration_s_ =
-              layer_progress_observed_duration_s_ == 0U
-                  ? completed_duration_s
-                  : ((layer_progress_observed_duration_s_ * 3U) + completed_duration_s) / 4U;
+        if (completed_duration_s >= 3U && completed_duration_s <= 900U) {
+          if (layer_progress_observed_duration_s_ == 0U) {
+            layer_progress_observed_duration_s_ = completed_duration_s;
+          } else if (completed_duration_s * 2U < layer_progress_observed_duration_s_) {
+            // Layer patterns can change abruptly. If the new layer is much
+            // faster than the learned value, snap down quickly so short
+            // repeated layers don't spend ages stuck at half progress.
+            layer_progress_observed_duration_s_ = completed_duration_s;
+          } else {
+            layer_progress_observed_duration_s_ =
+                ((layer_progress_observed_duration_s_ * 2U) + completed_duration_s) / 3U;
+          }
         }
       }
       layer_progress_layer_ = snapshot.current_layer;
@@ -2622,12 +2683,77 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
         logo_preview_active_ = false;
       }
       if (use_status_art && status_art_badge_ != nullptr) {
-        if (!status_art_visible_ || last_status_art_key_ != status_art.key) {
-          lv_obj_set_style_bg_color(status_art_badge_, lv_color_hex(status_art.bg_hex), 0);
+        const bool motion_theme = status_icon_theme_ == StatusIconTheme::kMotion;
+        const bool showcase_motion_theme = status_icon_theme_ == StatusIconTheme::kShowcaseMotion;
+        const bool showcase_theme =
+            status_icon_theme_ == StatusIconTheme::kShowcase || showcase_motion_theme;
+        const bool animated_theme = motion_theme || showcase_motion_theme;
+        if (!status_art_visible_ || last_status_art_key_ != status_art.key ||
+            last_status_art_theme_ != status_icon_theme_) {
+          const uint32_t badge_bg = motion_theme ? 0x07130F : (showcase_theme ? 0x000000 : status_art.bg_hex);
+          lv_obj_set_size(status_art_badge_, showcase_theme ? 118 : (motion_theme ? 96 : 82),
+                          showcase_theme ? 118 : (motion_theme ? 96 : 82));
+          lv_obj_set_style_bg_color(status_art_badge_, lv_color_hex(badge_bg), 0);
+          lv_obj_set_style_bg_opa(status_art_badge_,
+                                  showcase_theme ? LV_OPA_TRANSP
+                                                 : (motion_theme ? LV_OPA_90 : LV_OPA_COVER),
+                                  0);
           lv_obj_set_style_border_color(status_art_badge_, lv_color_hex(status_art.accent_hex), 0);
+          lv_obj_set_style_border_opa(status_art_badge_,
+                                      showcase_theme ? LV_OPA_TRANSP
+                                                     : (motion_theme ? LV_OPA_80 : LV_OPA_70),
+                                      0);
+          lv_obj_set_style_border_width(status_art_badge_, showcase_theme ? 0 : (motion_theme ? 3 : 2), 0);
           lv_obj_set_style_bg_color(status_art_dot_, lv_color_hex(status_art.accent_hex), 0);
+          lv_obj_set_style_bg_opa(status_art_dot_, motion_theme ? LV_OPA_COVER : LV_OPA_COVER, 0);
+          if (status_art_inner_ring_ != nullptr) {
+            lv_obj_set_style_border_color(status_art_inner_ring_, lv_color_hex(status_art.accent_hex), 0);
+          }
+          if (status_art_scan_ != nullptr) {
+            lv_obj_set_style_bg_color(status_art_scan_, lv_color_hex(status_art.accent_hex), 0);
+          }
+          if (status_art_accent_a_ != nullptr) {
+            lv_obj_set_style_bg_color(status_art_accent_a_, lv_color_hex(status_art.accent_hex), 0);
+          }
+          if (status_art_accent_b_ != nullptr) {
+            lv_obj_set_style_bg_color(status_art_accent_b_, lv_color_hex(status_art.accent_hex), 0);
+          }
           set_label_text_if_changed(status_art_icon_label_, status_art.icon);
+          lv_obj_set_style_text_color(status_art_icon_label_,
+                                      lv_color_hex(motion_theme ? status_art.accent_hex : 0xFFFFFF),
+                                      0);
+          lv_obj_align(status_art_dot_, motion_theme ? LV_ALIGN_CENTER : LV_ALIGN_BOTTOM_MID,
+                       0, motion_theme ? 28 : -8);
+          if (status_art_showcase_image_ != nullptr) {
+            const lv_image_dsc_t* art = showcase_art_for_key(status_art.key);
+            if (art != nullptr) {
+              lv_image_set_src(status_art_showcase_image_, art);
+              lv_image_set_pivot(status_art_showcase_image_, 56, 56);
+              lv_image_set_rotation(status_art_showcase_image_, 0);
+              lv_image_set_scale(status_art_showcase_image_, 256);
+              lv_obj_center(status_art_showcase_image_);
+              lv_obj_set_style_image_recolor(status_art_showcase_image_,
+                                             lv_color_hex(status_art.accent_hex), 0);
+              lv_obj_set_style_image_recolor_opa(status_art_showcase_image_, LV_OPA_TRANSP, 0);
+            }
+          }
           last_status_art_key_ = status_art.key;
+          last_status_art_theme_ = status_icon_theme_;
+          status_art_accent_hex_ = status_art.accent_hex;
+        }
+        set_hidden(status_art_inner_ring_, !animated_theme);
+        set_hidden(status_art_scan_, !animated_theme);
+        set_hidden(status_art_accent_a_, !animated_theme);
+        set_hidden(status_art_accent_b_, !animated_theme);
+        set_hidden(status_art_showcase_image_, !showcase_theme);
+        set_hidden(status_art_icon_label_, showcase_theme);
+        set_hidden(status_art_dot_, showcase_theme && !showcase_motion_theme);
+        if (status_art_anim_timer_ != nullptr) {
+          if (animated_theme) {
+            lv_timer_resume(status_art_anim_timer_);
+          } else {
+            lv_timer_pause(status_art_anim_timer_);
+          }
         }
         set_hidden(status_art_badge_, false);
         set_hidden(logo_image_, true);
@@ -2635,8 +2761,17 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
       } else {
         if (status_art_visible_) {
           set_hidden(status_art_badge_, true);
+          set_hidden(status_art_inner_ring_, true);
+          set_hidden(status_art_scan_, true);
+          set_hidden(status_art_accent_a_, true);
+          set_hidden(status_art_accent_b_, true);
+          set_hidden(status_art_showcase_image_, true);
+          if (status_art_anim_timer_ != nullptr) {
+            lv_timer_pause(status_art_anim_timer_);
+          }
           status_art_visible_ = false;
           last_status_art_key_.clear();
+          last_status_art_theme_ = status_icon_theme_;
         }
         set_hidden(logo_image_, false);
       }
@@ -2983,6 +3118,89 @@ void Ui::ams_error_pulse_timer_cb(lv_timer_t* timer) {
       lv_obj_set_style_bg_color(arrow, col, 0);
       lv_obj_invalidate(arrow);
     }
+  }
+}
+
+void Ui::status_art_anim_timer_cb(lv_timer_t* timer) {
+  auto* ui = static_cast<Ui*>(lv_timer_get_user_data(timer));
+  if (ui == nullptr || ui->status_art_badge_ == nullptr || ui->status_art_dot_ == nullptr) {
+    return;
+  }
+  const bool motion_theme = ui->status_icon_theme_ == StatusIconTheme::kMotion;
+  const bool showcase_motion_theme = ui->status_icon_theme_ == StatusIconTheme::kShowcaseMotion;
+  if ((!motion_theme && !showcase_motion_theme) || !ui->status_art_visible_ ||
+      lv_obj_has_flag(ui->status_art_badge_, LV_OBJ_FLAG_HIDDEN)) {
+    return;
+  }
+
+  const uint32_t t = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+  const uint32_t phase = (t / 45U) % 100U;
+  const int32_t sweep = -30 + static_cast<int32_t>((phase * 60U) / 99U);
+  const int32_t pulse = static_cast<int32_t>((t / 80U) % 28U);
+  const int32_t tri = pulse < 14 ? pulse : 28 - pulse;
+  const int32_t ring_size = 52 + tri;
+  const lv_opa_t soft_opa = static_cast<lv_opa_t>(55 + tri * 9);
+  const std::string key = ui->last_status_art_key_;
+
+  if (ui->status_art_inner_ring_ != nullptr) {
+    const int32_t size = showcase_motion_theme ? (86 + tri) : ring_size;
+    lv_obj_set_size(ui->status_art_inner_ring_, size, size);
+    lv_obj_set_style_border_opa(ui->status_art_inner_ring_,
+                                showcase_motion_theme ? static_cast<lv_opa_t>(35 + tri * 5)
+                                                      : soft_opa,
+                                0);
+    lv_obj_center(ui->status_art_inner_ring_);
+  }
+
+  if (ui->status_art_scan_ != nullptr) {
+    const bool scan_state = key == "checking_surface" || key == "leveling_bed" ||
+                            key == "calibrating_flow" || key == "detecting_hotend" ||
+                            key == "cleaning_nozzle" || key == "homing";
+    set_hidden(ui->status_art_scan_, !scan_state);
+    if (scan_state) {
+      const bool vertical = key == "homing";
+      const int32_t scan_len = showcase_motion_theme ? 78 : 58;
+      lv_obj_set_size(ui->status_art_scan_, vertical ? 3 : scan_len, vertical ? scan_len : 3);
+      lv_obj_align(ui->status_art_scan_, LV_ALIGN_CENTER, vertical ? sweep : 0,
+                   vertical ? 0 : sweep / 2);
+      lv_obj_set_style_bg_opa(ui->status_art_scan_,
+                              showcase_motion_theme ? LV_OPA_50 : LV_OPA_70, 0);
+    }
+  }
+
+  if (showcase_motion_theme && ui->status_art_showcase_image_ != nullptr) {
+    const int32_t image_scale = 252 + tri;
+    int32_t image_rotation = 0;
+    if (key == "vibration") {
+      image_rotation = phase < 50U ? -28 : 28;
+    } else if (key == "changing_filament" || key == "calibrating_flow" ||
+               key == "cleaning_nozzle") {
+      image_rotation = -18 + static_cast<int32_t>((phase * 36U) / 99U);
+    } else if (key == "homing" || key == "checking_surface" || key == "leveling_bed") {
+      image_rotation = -8 + static_cast<int32_t>((phase * 16U) / 99U);
+    }
+    lv_image_set_scale(ui->status_art_showcase_image_, image_scale);
+    lv_image_set_rotation(ui->status_art_showcase_image_, image_rotation);
+    lv_obj_center(ui->status_art_showcase_image_);
+    lv_obj_set_style_image_recolor_opa(
+        ui->status_art_showcase_image_,
+        static_cast<lv_opa_t>(key == "heating_bed" || key == "heating_chamber" ? 22 + tri : tri),
+        0);
+  }
+
+  if (key == "changing_filament") {
+    lv_obj_align(ui->status_art_dot_, LV_ALIGN_CENTER, sweep, 26);
+  } else if (key == "heating_chamber" || key == "heating_bed" ||
+             key == "detecting_hotend" || key == "cleaning_nozzle") {
+    lv_obj_align(ui->status_art_dot_, LV_ALIGN_CENTER, -20 + static_cast<int32_t>(phase % 40U),
+                 27 - static_cast<int32_t>((phase * 34U) / 99U));
+  } else if (key == "vibration") {
+    const int32_t x = (phase < 50U) ? -8 : 8;
+    lv_obj_align(ui->status_art_dot_, LV_ALIGN_CENTER, x, 28);
+  } else if (key == "homing") {
+    lv_obj_align(ui->status_art_dot_, LV_ALIGN_CENTER, sweep / 2, sweep / 2);
+  } else {
+    lv_obj_align(ui->status_art_dot_, LV_ALIGN_CENTER, sweep, 28);
   }
 }
 
@@ -3433,6 +3651,56 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_clear_flag(status_art_badge_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_clear_flag(status_art_badge_, LV_OBJ_FLAG_SCROLLABLE);
 
+  status_art_inner_ring_ = lv_obj_create(status_art_badge_);
+  lv_obj_set_size(status_art_inner_ring_, 56, 56);
+  lv_obj_set_style_radius(status_art_inner_ring_, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(status_art_inner_ring_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_color(status_art_inner_ring_, lv_color_hex(0x2FF28A), 0);
+  lv_obj_set_style_border_opa(status_art_inner_ring_, LV_OPA_60, 0);
+  lv_obj_set_style_border_width(status_art_inner_ring_, 1, 0);
+  lv_obj_set_style_pad_all(status_art_inner_ring_, 0, 0);
+  lv_obj_center(status_art_inner_ring_);
+  lv_obj_clear_flag(status_art_inner_ring_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(status_art_inner_ring_, LV_OBJ_FLAG_SCROLLABLE);
+
+  status_art_scan_ = lv_obj_create(status_art_badge_);
+  lv_obj_set_size(status_art_scan_, 58, 3);
+  lv_obj_set_style_radius(status_art_scan_, 2, 0);
+  lv_obj_set_style_bg_color(status_art_scan_, lv_color_hex(0x2FF28A), 0);
+  lv_obj_set_style_bg_opa(status_art_scan_, LV_OPA_60, 0);
+  lv_obj_set_style_border_opa(status_art_scan_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_all(status_art_scan_, 0, 0);
+  lv_obj_center(status_art_scan_);
+  lv_obj_clear_flag(status_art_scan_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(status_art_scan_, LV_OBJ_FLAG_SCROLLABLE);
+
+  status_art_accent_a_ = lv_obj_create(status_art_badge_);
+  lv_obj_set_size(status_art_accent_a_, 34, 3);
+  lv_obj_set_style_radius(status_art_accent_a_, 2, 0);
+  lv_obj_set_style_bg_color(status_art_accent_a_, lv_color_hex(0x2FF28A), 0);
+  lv_obj_set_style_bg_opa(status_art_accent_a_, LV_OPA_70, 0);
+  lv_obj_set_style_border_opa(status_art_accent_a_, LV_OPA_TRANSP, 0);
+  lv_obj_align(status_art_accent_a_, LV_ALIGN_TOP_MID, 0, 15);
+  lv_obj_clear_flag(status_art_accent_a_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(status_art_accent_a_, LV_OBJ_FLAG_SCROLLABLE);
+
+  status_art_accent_b_ = lv_obj_create(status_art_badge_);
+  lv_obj_set_size(status_art_accent_b_, 34, 3);
+  lv_obj_set_style_radius(status_art_accent_b_, 2, 0);
+  lv_obj_set_style_bg_color(status_art_accent_b_, lv_color_hex(0x2FF28A), 0);
+  lv_obj_set_style_bg_opa(status_art_accent_b_, LV_OPA_70, 0);
+  lv_obj_set_style_border_opa(status_art_accent_b_, LV_OPA_TRANSP, 0);
+  lv_obj_align(status_art_accent_b_, LV_ALIGN_BOTTOM_MID, 0, -15);
+  lv_obj_clear_flag(status_art_accent_b_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(status_art_accent_b_, LV_OBJ_FLAG_SCROLLABLE);
+
+  status_art_showcase_image_ = lv_image_create(status_art_badge_);
+  lv_image_set_src(status_art_showcase_image_, &status_showcase_homing);
+  lv_image_set_scale(status_art_showcase_image_, 256);
+  lv_obj_center(status_art_showcase_image_);
+  lv_obj_clear_flag(status_art_showcase_image_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(status_art_showcase_image_, LV_OBJ_FLAG_SCROLLABLE);
+
   status_art_icon_label_ = lv_label_create(status_art_badge_);
   set_label_text_if_changed(status_art_icon_label_, kMdiSync);
   lv_obj_set_style_text_font(status_art_icon_label_, mdi40, 0);
@@ -3448,6 +3716,14 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_set_style_pad_all(status_art_dot_, 0, 0);
   lv_obj_align(status_art_dot_, LV_ALIGN_BOTTOM_MID, 0, -8);
   lv_obj_add_flag(status_art_badge_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(status_art_inner_ring_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(status_art_scan_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(status_art_accent_a_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(status_art_accent_b_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(status_art_showcase_image_, LV_OBJ_FLAG_HIDDEN);
+
+  status_art_anim_timer_ = lv_timer_create(&Ui::status_art_anim_timer_cb, 90, this);
+  lv_timer_pause(status_art_anim_timer_);
 
   status_label_ = lv_label_create(page1_);
   set_label_text_if_changed(status_label_, "waiting...");

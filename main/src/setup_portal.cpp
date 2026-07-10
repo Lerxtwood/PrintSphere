@@ -1416,6 +1416,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   const BambuCloudCredentials cloud = portal->config_store_.load_cloud_credentials();
   const SourceMode source_mode = portal->config_store_.load_source_mode();
   const DisplayRotation display_rotation = portal->config_store_.load_display_rotation();
+  const StatusIconTheme status_icon_theme = portal->config_store_.load_status_icon_theme();
   const bool portal_lock_enabled = portal->config_store_.load_portal_lock_enabled();
   const bool filament_wake = portal->config_store_.load_filament_wake_enabled();
   const bool filament_anim = portal->config_store_.load_filament_anim_enabled();
@@ -1531,6 +1532,12 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   const char* wifi_section_badge_class =
       wifi_connected ? "ok" : (wifi_configured ? "info" : "warn");
   const std::string rotation_section_badge_value = display_rotation_badge_value(display_rotation);
+  const std::string status_icon_badge_value =
+      status_icon_theme == StatusIconTheme::kShowcaseMotion
+          ? "Showcase Motion"
+          : (status_icon_theme == StatusIconTheme::kShowcase
+                 ? "Showcase"
+                 : (status_icon_theme == StatusIconTheme::kMotion ? "Motion" : "Basic"));
   const std::string ams_display_badge_value = filament_wake || !filament_anim ? "On" : "Off";
   const char* ams_display_badge_class = filament_wake || !filament_anim ? "info" : "idle";
   const std::string arc_badge_value = arc_colors_custom ? "Custom" : "Default";
@@ -1916,6 +1923,34 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
     html += "<p class=\"micro\">Current orientation: ";
     html += json_escape(display_rotation_badge_value(display_rotation));
     html += "</p>";
+    end_settings_panel();
+
+    begin_settings_panel(
+        "Pre-print Status Art",
+        "Choose the center artwork shown while the printer is preparing, calibrating, heating, or changing filament.",
+        status_icon_badge_value, "info", false);
+    html += "<div class=\"field\"><label for=\"status_icon_theme\">Status Icon Theme</label><select id=\"status_icon_theme\">";
+    html += "<option value=\"basic\"";
+    if (status_icon_theme == StatusIconTheme::kBasic) {
+      html += " selected";
+    }
+    html += ">Basic: current badge icons</option>";
+    html += "<option value=\"motion\"";
+    if (status_icon_theme == StatusIconTheme::kMotion) {
+      html += " selected";
+    }
+    html += ">Motion: animated prep-state artwork</option>";
+    html += "<option value=\"showcase\"";
+    if (status_icon_theme == StatusIconTheme::kShowcase) {
+      html += " selected";
+    }
+    html += ">Showcase: high-color AMOLED artwork</option>";
+    html += "<option value=\"showcase_motion\"";
+    if (status_icon_theme == StatusIconTheme::kShowcaseMotion) {
+      html += " selected";
+    }
+    html += ">Showcase Motion: animated AMOLED artwork</option></select>";
+    html += "<div class=\"micro\">Basic uses compact symbols, Motion adds lightweight LVGL animation, Showcase uses richer bitmap artwork, and Showcase Motion animates that artwork live.</div></div>";
     end_settings_panel();
 
     begin_settings_panel(
@@ -2587,6 +2622,8 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += to_string(source_mode);
   html += "\",display_rotation:\"";
   html += to_string(display_rotation);
+  html += "\",status_icon_theme:\"";
+  html += to_string(status_icon_theme);
   html += "\",portal_lock_enabled:";
   html += portal_lock_enabled ? "true" : "false";
   html += ",printer_host:\"";
@@ -2867,6 +2904,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "cloud_region:(document.getElementById('cloud_region')?valueOf('cloud_region'):savedConfig.cloud_region||'eu'),"
           "cloud_password:(document.getElementById('cloud_password')?valueOf('cloud_password'):''),"
           "display_rotation:(document.getElementById('display_rotation')?valueOf('display_rotation'):savedConfig.display_rotation)||'0',"
+          "status_icon_theme:(document.getElementById('status_icon_theme')?valueOf('status_icon_theme'):savedConfig.status_icon_theme)||'basic',"
           "portal_lock_enabled:(document.getElementById('portal_lock_enabled')?valueOf('portal_lock_enabled')==='true':savedConfig.portal_lock_enabled!==false),"
           "filament_wake:(document.getElementById('filament_wake')?valueOf('filament_wake')==='true':savedConfig.filament_wake===true),"
           "filament_anim:(document.getElementById('filament_anim')?valueOf('filament_anim')==='true':savedConfig.filament_anim!==false),"
@@ -3571,6 +3609,7 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   const BambuCloudCredentials cloud = portal->config_store_.load_cloud_credentials();
   const SourceMode source_mode = portal->config_store_.load_source_mode();
   const DisplayRotation display_rotation = portal->config_store_.load_display_rotation();
+  const StatusIconTheme status_icon_theme = portal->config_store_.load_status_icon_theme();
   const bool portal_lock_enabled = portal->config_store_.load_portal_lock_enabled();
   const PrinterConnection printer = portal->config_store_.load_active_printer_profile().to_connection();
   const ArcColorScheme arc_colors = portal->config_store_.load_arc_color_scheme();
@@ -3602,6 +3641,9 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   body += "\",";
   body += "\"display_rotation\":\"";
   body += to_string(display_rotation);
+  body += "\",";
+  body += "\"status_icon_theme\":\"";
+  body += to_string(status_icon_theme);
   body += "\",";
   body += "\"portal_lock_enabled\":";
   body += portal_lock_enabled ? "true" : "false";
@@ -3689,6 +3731,10 @@ esp_err_t SetupPortal::handle_config_post(httpd_req_t* request) {
   }, stored_cloud);
   const SourceMode source_mode = parse_source_mode_field(root);
   const DisplayRotation display_rotation = parse_display_rotation_field(root);
+  const std::string status_icon_theme_field = trim_copy(read_string_field(root, "status_icon_theme"));
+  const StatusIconTheme status_icon_theme = status_icon_theme_field.empty()
+      ? portal->config_store_.load_status_icon_theme()
+      : parse_status_icon_theme(status_icon_theme_field);
   const bool portal_lock_enabled =
       read_bool_field(root, "portal_lock_enabled", stored_portal_lock_enabled);
   const bool filament_wake =
@@ -3777,6 +3823,8 @@ esp_err_t SetupPortal::handle_config_post(httpd_req_t* request) {
                       "save source mode failed");
   ESP_RETURN_ON_ERROR(portal->config_store_.save_display_rotation(display_rotation), kTag,
                       "save display rotation failed");
+  ESP_RETURN_ON_ERROR(portal->config_store_.save_status_icon_theme(status_icon_theme), kTag,
+                      "save status icon theme failed");
   ESP_RETURN_ON_ERROR(portal->config_store_.save_portal_lock_enabled(portal_lock_enabled), kTag,
                       "save portal lock failed");
   ESP_RETURN_ON_ERROR(portal->config_store_.save_filament_wake_enabled(filament_wake), kTag,

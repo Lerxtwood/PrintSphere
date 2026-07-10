@@ -327,6 +327,7 @@ void Application::run() {
   ui_.set_arc_color_scheme(config_store_.load_arc_color_scheme());
   ui_.set_display_rotation(config_store_.load_display_rotation());
   ui_.set_battery_display_policy(config_store_.load_battery_display_policy());
+  ui_.set_status_icon_theme(config_store_.load_status_icon_theme());
   filament_wake_enabled_ = config_store_.load_filament_wake_enabled();
   filament_anim_enabled_ = config_store_.load_filament_anim_enabled();
   audio_notifier_.set_enabled(config_store_.load_audio_enabled());

@@ -28,12 +28,21 @@ enum class DisplayRotation : uint8_t {
   k270,
 };
 
+enum class StatusIconTheme : uint8_t {
+  kBasic,
+  kMotion,
+  kShowcase,
+  kShowcaseMotion,
+};
+
 const char* to_string(SourceMode mode);
 SourceMode parse_source_mode(const std::string& value);
 const char* to_string(CloudRegion region);
 CloudRegion parse_cloud_region(const std::string& value);
 const char* to_string(DisplayRotation rotation);
 DisplayRotation parse_display_rotation(const std::string& value);
+const char* to_string(StatusIconTheme theme);
+StatusIconTheme parse_status_icon_theme(const std::string& value);
 
 struct WifiCredentials {
   std::string ssid;
@@ -135,6 +144,7 @@ class ConfigStore {
   int load_audio_volume_percent() const;
   QuietHoursConfig load_quiet_hours() const;
   ArcColorScheme load_arc_color_scheme() const;
+  StatusIconTheme load_status_icon_theme() const;
   BatteryDisplayPolicy load_battery_display_policy() const;
   // IANA timezone name (e.g. "Europe/Berlin"). Empty when never configured;
   // callers should fall back to a sensible default (handled in time_sync).
@@ -153,6 +163,7 @@ class ConfigStore {
   esp_err_t save_audio_volume_percent(int volume) const;
   esp_err_t save_quiet_hours(const QuietHoursConfig& config) const;
   esp_err_t save_timezone_iana(const std::string& iana_name) const;
+  esp_err_t save_status_icon_theme(StatusIconTheme theme) const;
   std::vector<PrinterProfile> load_printer_profiles() const;
   esp_err_t save_printer_profile(const PrinterProfile& profile) const;
   esp_err_t delete_printer_profile(uint8_t index) const;

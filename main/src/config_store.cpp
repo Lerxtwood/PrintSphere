@@ -171,6 +171,34 @@ DisplayRotation parse_display_rotation(const std::string& value) {
   return DisplayRotation::k0;
 }
 
+const char* to_string(StatusIconTheme theme) {
+  switch (theme) {
+    case StatusIconTheme::kMotion:
+      return "motion";
+    case StatusIconTheme::kShowcase:
+      return "showcase";
+    case StatusIconTheme::kShowcaseMotion:
+      return "showcase_motion";
+    case StatusIconTheme::kBasic:
+    default:
+      return "basic";
+  }
+}
+
+StatusIconTheme parse_status_icon_theme(const std::string& value) {
+  if (value == "motion" || value == "simple_animation" || value == "animated") {
+    return StatusIconTheme::kMotion;
+  }
+  if (value == "showcase" || value == "detailed" || value == "detailed_animation") {
+    return StatusIconTheme::kShowcase;
+  }
+  if (value == "showcase_motion" || value == "showcasemotion" ||
+      value == "animated_showcase" || value == "detailed_motion") {
+    return StatusIconTheme::kShowcaseMotion;
+  }
+  return StatusIconTheme::kBasic;
+}
+
 esp_err_t ConfigStore::initialize() {
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -335,6 +363,10 @@ ArcColorScheme ConfigStore::load_arc_color_scheme() const {
   return colors;
 }
 
+StatusIconTheme ConfigStore::load_status_icon_theme() const {
+  return parse_status_icon_theme(load_string("status_icons"));
+}
+
 BatteryDisplayPolicy ConfigStore::load_battery_display_policy() const {
   BatteryDisplayPolicy policy;
   policy.dim_enabled = parse_bool_or_default(load_string("bat_dim"), true);
@@ -441,6 +473,10 @@ std::string ConfigStore::load_timezone_iana() const {
 
 esp_err_t ConfigStore::save_timezone_iana(const std::string& iana_name) const {
   return save_string("tz_iana", iana_name);
+}
+
+esp_err_t ConfigStore::save_status_icon_theme(StatusIconTheme theme) const {
+  return save_string("status_icons", to_string(theme));
 }
 
 esp_err_t ConfigStore::save_arc_color_scheme(const ArcColorScheme& colors) const {

@@ -41,6 +41,7 @@ class Ui {
   void set_display_rotation(DisplayRotation rotation);
   esp_err_t initialize();
   void set_arc_color_scheme(const ArcColorScheme& colors);
+  void set_status_icon_theme(StatusIconTheme theme);
   void apply_snapshot(const PrinterSnapshot& snapshot);
   void update_power_save(bool on_battery, bool keep_awake);
   void set_battery_display_policy(const BatteryDisplayPolicy& policy);
@@ -135,6 +136,7 @@ class Ui {
   // Sets ams_tray_error_[unit][slot] for AMS-class HMS codes.
   void compute_ams_tray_errors(const PrinterSnapshot& snapshot);
   static void ams_error_pulse_timer_cb(lv_timer_t* timer);
+  static void status_art_anim_timer_cb(lv_timer_t* timer);
   void apply_ams_error_pulse_locked();
   static void pulse_anim_exec_cb(void* var, int32_t scale);
   static void pager_event_cb(lv_event_t* event);
@@ -223,6 +225,11 @@ class Ui {
   lv_obj_t* status_art_badge_ = nullptr;
   lv_obj_t* status_art_icon_label_ = nullptr;
   lv_obj_t* status_art_dot_ = nullptr;
+  lv_obj_t* status_art_inner_ring_ = nullptr;
+  lv_obj_t* status_art_scan_ = nullptr;
+  lv_obj_t* status_art_accent_a_ = nullptr;
+  lv_obj_t* status_art_accent_b_ = nullptr;
+  lv_obj_t* status_art_showcase_image_ = nullptr;
   lv_obj_t* status_label_ = nullptr;
   lv_obj_t* detail_label_ = nullptr;
   lv_obj_t* layer_progress_row_ = nullptr;
@@ -264,6 +271,7 @@ class Ui {
   lv_obj_t* portal_overlay_value_ = nullptr;
   lv_obj_t* portal_overlay_detail_ = nullptr;
   lv_timer_t* ring_anim_timer_ = nullptr;  // unused, ambient sweep timer removed
+  lv_timer_t* status_art_anim_timer_ = nullptr;
   int user_brightness_percent_ = 80;
   int applied_brightness_percent_ = -1;
   bool gesture_active_ = false;
@@ -300,6 +308,8 @@ class Ui {
   std::atomic<bool> page_scrolling_snapshot_{false};
   int last_parallax_clamped_ = -1;
   ArcColorScheme arc_colors_{};
+  StatusIconTheme status_icon_theme_ = StatusIconTheme::kBasic;
+  uint32_t status_art_accent_hex_ = 0x2FF28A;
   uint32_t last_accent_hex_ = 0;
   uint32_t last_ring_main_hex_ = UINT32_MAX;
   uint32_t last_ring_indicator_hex_ = UINT32_MAX;
@@ -330,6 +340,7 @@ class Ui {
   bool logo_recolor_enabled_ = false;
   uint32_t logo_recolor_hex_ = 0;
   std::string last_status_art_key_;
+  StatusIconTheme last_status_art_theme_ = StatusIconTheme::kBasic;
   bool portal_lock_enabled_ = true;
   bool portal_request_authorized_ = false;
   bool portal_session_active_ = false;
