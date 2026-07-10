@@ -3284,6 +3284,9 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
     if (!stage_text.empty()) {
       copy_text(&runtime.raw_stage, stage_text);
       copy_text(&runtime.stage, stage_text);
+    } else if (!status_text.empty() && lifecycle == PrintLifecycleState::kPrinting) {
+      copy_text(&runtime.raw_stage, "");
+      copy_text(&runtime.stage, cloud_stage_label_for(status_text, lifecycle));
     }
 
     const std::string subtask_name = trim_job_name_cloud(
@@ -3364,10 +3367,18 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
     runtime.secondary_nozzle_temp_c = nozzle_temps.secondary;
     runtime.nozzle_target_temp_c = nozzle_temps.active_target;
     runtime.secondary_nozzle_target_temp_c = nozzle_temps.secondary_target;
-    runtime.right_nozzle_temp_c = nozzle_temps.right;
-    runtime.right_nozzle_target_temp_c = nozzle_temps.right_target;
-    runtime.left_nozzle_temp_c = nozzle_temps.left;
-    runtime.left_nozzle_target_temp_c = nozzle_temps.left_target;
+    if (nozzle_temps.right_present) {
+      runtime.right_nozzle_temp_c = nozzle_temps.right;
+    }
+    if (nozzle_temps.right_target_present) {
+      runtime.right_nozzle_target_temp_c = nozzle_temps.right_target;
+    }
+    if (nozzle_temps.left_present) {
+      runtime.left_nozzle_temp_c = nozzle_temps.left;
+    }
+    if (nozzle_temps.left_target_present) {
+      runtime.left_nozzle_target_temp_c = nozzle_temps.left_target;
+    }
     if (nozzle_temps.active_nozzle_index >= 0) {
       runtime.active_nozzle_index = nozzle_temps.active_nozzle_index;
     }

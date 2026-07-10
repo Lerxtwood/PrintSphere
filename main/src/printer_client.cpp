@@ -952,6 +952,10 @@ struct NozzleTemperatureBundle {
   float left = 0.0f;
   float right_target = 0.0f;
   float left_target = 0.0f;
+  bool right_present = false;
+  bool left_present = false;
+  bool right_target_present = false;
+  bool left_target_present = false;
   int active_nozzle_index = -1;  // -1 = single nozzle, 0 = right, 1 = left (H2D)
 };
 
@@ -967,10 +971,14 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
                                   float* active_temp, float* secondary_temp,
                                   float* active_target, float* secondary_target,
                                   float* right_temp, float* left_temp,
-                                  float* right_target, float* left_target) {
+                                  float* right_target, float* left_target,
+                                  bool* right_present, bool* left_present,
+                                  bool* right_target_present, bool* left_target_present) {
   if (!cJSON_IsArray(info_array) || active_temp == nullptr || secondary_temp == nullptr ||
       active_target == nullptr || secondary_target == nullptr || right_temp == nullptr ||
-      left_temp == nullptr || right_target == nullptr || left_target == nullptr) {
+      left_temp == nullptr || right_target == nullptr || left_target == nullptr ||
+      right_present == nullptr || left_present == nullptr ||
+      right_target_present == nullptr || left_target_present == nullptr) {
     return;
   }
 
@@ -999,10 +1007,18 @@ void merge_nozzle_temp_candidates(const cJSON* info_array, int active_nozzle_ind
 
     if (id == 0) {
       *right_temp = temp;
-      if (target > -999.0f) *right_target = target;
+      *right_present = true;
+      if (target > -999.0f) {
+        *right_target = target;
+        *right_target_present = true;
+      }
     } else if (id == 1) {
       *left_temp = temp;
-      if (target > -999.0f) *left_target = target;
+      *left_present = true;
+      if (target > -999.0f) {
+        *left_target = target;
+        *left_target_present = true;
+      }
     }
 
     if (first_temp < -999.0f) {
@@ -1145,25 +1161,37 @@ NozzleTemperatureBundle extract_nozzle_temperature_bundle(const cJSON* print, fl
                                merge_index, &bundle.active, &bundle.secondary,
                                &bundle.active_target, &bundle.secondary_target,
                                &bundle.right, &bundle.left,
-                               &bundle.right_target, &bundle.left_target);
+                               &bundle.right_target, &bundle.left_target,
+                               &bundle.right_present, &bundle.left_present,
+                               &bundle.right_target_present, &bundle.left_target_present);
   merge_nozzle_temp_candidates(child_array_local(extruder, "info"), merge_index,
                                &bundle.active, &bundle.secondary,
                                &bundle.active_target, &bundle.secondary_target,
                                &bundle.right, &bundle.left,
-                               &bundle.right_target, &bundle.left_target);
+                               &bundle.right_target, &bundle.left_target,
+                               &bundle.right_present, &bundle.left_present,
+                               &bundle.right_target_present, &bundle.left_target_present);
   if (active_nozzle_index == 0 && bundle.right <= 0.0f) {
     bundle.right = bundle.active;
     bundle.right_target = bundle.active_target;
+    bundle.right_present = bundle.active > 0.0f;
+    bundle.right_target_present = bundle.active_target > 0.0f;
   } else if (active_nozzle_index == 1 && bundle.left <= 0.0f) {
     bundle.left = bundle.active;
     bundle.left_target = bundle.active_target;
+    bundle.left_present = bundle.active > 0.0f;
+    bundle.left_target_present = bundle.active_target > 0.0f;
   }
   if (active_nozzle_index == 0 && bundle.left <= 0.0f) {
     bundle.left = bundle.secondary;
     bundle.left_target = bundle.secondary_target;
+    bundle.left_present = bundle.secondary > 0.0f;
+    bundle.left_target_present = bundle.secondary_target > 0.0f;
   } else if (active_nozzle_index == 1 && bundle.right <= 0.0f) {
     bundle.right = bundle.secondary;
     bundle.right_target = bundle.secondary_target;
+    bundle.right_present = bundle.secondary > 0.0f;
+    bundle.right_target_present = bundle.secondary_target > 0.0f;
   }
   ESP_LOGD(kTag, "[nozzle] bundle active=%.1f secondary=%.1f right=%.1f left=%.1f active_idx=%d",
            bundle.active, bundle.secondary, bundle.right, bundle.left, active_nozzle_index);
@@ -2079,8 +2107,18 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
       runtime.ams_filament_change_latched = ams_filament_change;
       runtime.ams_status_main = ams_status_main;
     }
-    const bool ams_change_active = runtime.ams_filament_change_latched;
     const bool stage_id_generic = (stage_id == 0 || stage_id == -1 || stage_id == 255);
+    const bool active_print_placeholder_packet =
+        raw_ams_status < 0 &&
+        is_active_gcode_state(effective_gcode_state) &&
+        stage_id_generic &&
+        (is_placeholder_stage_name(stage_name) || lower_copy(stage_name) == "printing") &&
+        is_filament_change_stage(previous_raw_stage);
+    if (active_print_placeholder_packet && runtime.ams_filament_change_latched) {
+      ESP_LOGI(kTag, "Clearing stale AMS filament-change latch on active print placeholder");
+      runtime.ams_filament_change_latched = false;
+    }
+    const bool ams_change_active = runtime.ams_filament_change_latched;
     const int effective_stage_id = (ams_change_active && stage_id_generic) ? 4 : stage_id;
     const cJSON* print_error_item = cJSON_GetObjectItemCaseSensitive(print, "print_error");
     const bool has_print_error_update = print_error_item != nullptr;
@@ -2154,10 +2192,18 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     runtime.secondary_nozzle_temp_c = nozzle_temps.secondary;
     runtime.nozzle_target_temp_c = nozzle_temps.active_target;
     runtime.secondary_nozzle_target_temp_c = nozzle_temps.secondary_target;
-    runtime.right_nozzle_temp_c = nozzle_temps.right;
-    runtime.right_nozzle_target_temp_c = nozzle_temps.right_target;
-    runtime.left_nozzle_temp_c = nozzle_temps.left;
-    runtime.left_nozzle_target_temp_c = nozzle_temps.left_target;
+    if (nozzle_temps.right_present) {
+      runtime.right_nozzle_temp_c = nozzle_temps.right;
+    }
+    if (nozzle_temps.right_target_present) {
+      runtime.right_nozzle_target_temp_c = nozzle_temps.right_target;
+    }
+    if (nozzle_temps.left_present) {
+      runtime.left_nozzle_temp_c = nozzle_temps.left;
+    }
+    if (nozzle_temps.left_target_present) {
+      runtime.left_nozzle_target_temp_c = nozzle_temps.left_target;
+    }
     if (nozzle_temps.active_nozzle_index >= 0) {
       runtime.active_nozzle_index = nozzle_temps.active_nozzle_index;
     }
@@ -2523,8 +2569,9 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
       // would false-clear at the START of a change when the old filament is still present.
       const bool tray_seated = runtime.tray_now >= 0 && runtime.tray_now == runtime.tray_tar;
       const bool filament_done = is_filament_change_stage(previous_raw_stage) &&
-                                 runtime.hw_switch_state == 1 && tray_seated &&
-                                 !runtime.ams_filament_change_latched;
+                                 !runtime.ams_filament_change_latched &&
+                                 ((runtime.hw_switch_state == 1 && tray_seated) ||
+                                  active_print_placeholder_packet);
       if (filament_done) {
         ESP_LOGI(kTag, "Filament change done (hw_switch=1, tray_now=%d==tray_tar), "
                  "clearing latched stage '%s'",
