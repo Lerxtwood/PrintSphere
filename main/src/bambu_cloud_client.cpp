@@ -3206,6 +3206,7 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
     const bool previous_non_error_stop = runtime.non_error_stop;
     const bool previous_has_error = runtime.has_error;
     const std::string previous_raw_stage = text_string(runtime.raw_stage);
+    const std::string previous_job_name = text_string(runtime.job_name);
     const int previous_tray_now = runtime.tray_now;
     const int previous_left_tray_now = runtime.left_tray_now;
     runtime.configured = true;
@@ -3324,9 +3325,33 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
 
     const bool active_lifecycle =
         lifecycle == PrintLifecycleState::kPreparing || lifecycle == PrintLifecycleState::kPrinting;
+    const std::string current_job_name = text_string(runtime.job_name);
+    const bool job_name_changed = !previous_job_name.empty() && !current_job_name.empty() &&
+                                  current_job_name != previous_job_name;
+    const bool stale_complete_progress = runtime.progress_percent >= 99.5f &&
+                                         !runtime.progress_is_download_related;
+    const bool active_preprint_signal =
+        active_lifecycle &&
+        (lifecycle == PrintLifecycleState::kPreparing ||
+         is_download_stage(stage_text, status_text) ||
+         known_operation_stage_string(stage_text));
+    const bool new_active_job = active_lifecycle && job_name_changed;
+    const bool stale_complete_restart = stale_complete_progress && active_preprint_signal;
     const bool lifecycle_reset =
         has_status_update && active_lifecycle && lifecycle != previous_lifecycle;
-    if (lifecycle_reset) {
+    if (lifecycle_reset || new_active_job || stale_complete_restart) {
+      if (new_active_job) {
+        ESP_LOGI(kTag,
+                 "Resetting print progress for new cloud job (job '%s'->'%s')",
+                 previous_job_name.empty() ? "(-)" : previous_job_name.c_str(),
+                 current_job_name.empty() ? "(-)" : current_job_name.c_str());
+      } else if (stale_complete_restart) {
+        ESP_LOGI(kTag,
+                 "Resetting stale 100%% cloud progress for active/pre-print update "
+                 "(status=%s stage=%s)",
+                 status_text.empty() ? "(-)" : status_text.c_str(),
+                 stage_text.empty() ? "(-)" : stage_text.c_str());
+      }
       runtime.progress_percent = 0.0f;
       runtime.progress_is_download_related = false;
       runtime.remaining_seconds = 0;

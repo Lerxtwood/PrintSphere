@@ -2039,6 +2039,8 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     const std::string previous_raw_stage = text_string(runtime.raw_stage);
     const std::string previous_stage = text_string(runtime.stage);
     const std::string previous_detail = text_string(runtime.detail);
+    const std::string previous_job_name = text_string(runtime.job_name);
+    const std::string previous_gcode_file = text_string(runtime.gcode_file);
     const PrintLifecycleState previous_lifecycle = runtime.lifecycle;
     const int previous_print_error_code = runtime.print_error_code;
     const uint16_t previous_hms_alert_count = runtime.hms_alert_count;
@@ -2584,6 +2586,30 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     if (!subtask_name.empty()) {
       copy_text(&runtime.job_name, subtask_name);
     }
+    const std::string current_job_name_for_reset = text_string(runtime.job_name);
+    const std::string current_gcode_file_for_reset = text_string(runtime.gcode_file);
+    const bool job_name_changed = !previous_job_name.empty() &&
+                                  !current_job_name_for_reset.empty() &&
+                                  current_job_name_for_reset != previous_job_name;
+    const bool gcode_file_changed = !previous_gcode_file.empty() &&
+                                    !current_gcode_file_for_reset.empty() &&
+                                    current_gcode_file_for_reset != previous_gcode_file;
+    const bool new_active_job_by_identity =
+        is_active_gcode_state(effective_gcode_state) && (job_name_changed || gcode_file_changed);
+    if (new_active_job_by_identity) {
+      ESP_LOGI(kTag,
+               "Resetting print progress for new local job "
+               "(job '%s'->'%s', gcode '%s'->'%s')",
+               previous_job_name.empty() ? "(-)" : previous_job_name.c_str(),
+               current_job_name_for_reset.empty() ? "(-)" : current_job_name_for_reset.c_str(),
+               previous_gcode_file.empty() ? "(-)" : previous_gcode_file.c_str(),
+               current_gcode_file_for_reset.empty() ? "(-)" : current_gcode_file_for_reset.c_str());
+      runtime.progress_percent = 0.0f;
+      runtime.progress_is_download_related = false;
+      runtime.remaining_seconds = 0U;
+      runtime.current_layer = 0U;
+      runtime.total_layers = 0U;
+    }
 
     copy_text(&runtime.raw_status, has_status_update ? gcode_state : previous_raw_status);
     if (stale_change_cleared_after_progress) {
@@ -2694,7 +2720,14 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     const bool leaving_download_phase =
         is_download_stage(previous_stage_for_progress, previous_raw_status) &&
         !current_download_phase;
+    const bool stale_complete_active_restart =
+        runtime.progress_percent >= 99.5f &&
+        !runtime.progress_is_download_related &&
+        is_active_gcode_state(text_string(runtime.raw_status)) &&
+        (current_prepare_phase || current_specific_non_download_stage);
     const bool should_reset_progress_for_new_cycle =
+        new_active_job_by_identity ||
+        stale_complete_active_restart ||
         ((entering_new_active_cycle && current_prepare_phase &&
           (previous_lifecycle == PrintLifecycleState::kFinished ||
            previous_lifecycle == PrintLifecycleState::kIdle ||
@@ -2704,6 +2737,13 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
         (leaving_download_phase && download_progress_complete &&
          (!has_progress_update || progress_is_download_related));
     if (should_reset_progress_for_new_cycle) {
+      if (stale_complete_active_restart && !new_active_job_by_identity) {
+        ESP_LOGI(kTag,
+                 "Resetting stale 100%% local progress for active/pre-print update "
+                 "(status=%s stage=%s)",
+                 text_string(runtime.raw_status).empty() ? "(-)" : text_string(runtime.raw_status).c_str(),
+                 current_stage_for_progress.empty() ? "(-)" : current_stage_for_progress.c_str());
+      }
       runtime.progress_percent = 0.0f;
       runtime.progress_is_download_related = current_download_phase;
       runtime.remaining_seconds = 0U;
