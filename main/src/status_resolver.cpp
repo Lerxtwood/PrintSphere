@@ -211,8 +211,16 @@ bool local_runtime_substate_should_override(const PrinterSnapshot& target,
   const std::string target_stage = effective_stage(target);
   const std::string local_status = effective_status(local_snapshot);
   const std::string target_status = effective_status(target);
+  const std::string local_display_stage = lower_copy(local_snapshot.stage);
 
-  const bool local_specific_stage = is_specific_runtime_stage(local_stage);
+  // The local MQTT path can keep a synthesized filament raw_stage around after
+  // the printer has resumed normal RUNNING/Printing updates.  If the local
+  // resolved stage has already fallen back to Printing, treat that filament
+  // raw_stage as stale and do not let it override a clean cloud status bundle.
+  const bool stale_local_filament_stage =
+      is_filament_stage(local_stage) && contains_token(local_display_stage, "printing");
+  const bool local_specific_stage =
+      is_specific_runtime_stage(local_stage) && !stale_local_filament_stage;
   const bool target_specific_stage = is_specific_runtime_stage(target_stage);
   const bool local_prepare = is_prepare_status(local_status, local_stage);
   const bool target_prepare = is_prepare_status(target_status, target_stage);

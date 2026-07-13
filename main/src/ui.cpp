@@ -711,6 +711,24 @@ struct RingVisual {
 };
 
 std::string current_operation_text(const PrinterSnapshot& snapshot);
+std::string lower_ui_text(std::string value);
+bool ui_text_contains(const std::string& haystack, const char* needle);
+
+bool stale_print_start_progress(const PrinterSnapshot& snapshot, int progress) {
+  return snapshot.lifecycle == PrintLifecycleState::kPrinting && snapshot.current_layer == 0 &&
+         progress >= 99;
+}
+
+bool stale_filament_stage_resolved_to_printing(const PrinterSnapshot& snapshot) {
+  const std::string raw_stage = lower_ui_text(snapshot.raw_stage);
+  const std::string display_stage = lower_ui_text(snapshot.stage);
+  return snapshot.lifecycle == PrintLifecycleState::kPrinting &&
+         (ui_text_contains(raw_stage, "filament_loading") ||
+          ui_text_contains(raw_stage, "filament_unloading") ||
+          ui_text_contains(raw_stage, "changing_filament") ||
+          ui_text_contains(raw_stage, "changing filament")) &&
+         ui_text_contains(display_stage, "printing");
+}
 
 RingVisual lifecycle_ring_visual(const PrinterSnapshot& snapshot, const ArcColorScheme& colors) {
   const int progress = std::clamp(static_cast<int>(std::lround(snapshot.progress_percent)), 0, 100);
@@ -725,7 +743,15 @@ RingVisual lifecycle_ring_visual(const PrinterSnapshot& snapshot, const ArcColor
   }
 
   // Filament load/unload animation — direction derived from resolver's ui_status.
-  if (snapshot.ui_status == "loading" || snapshot.ui_status == "unloading") {
+  if (stale_print_start_progress(snapshot, progress)) {
+    visual.main_hex = kRingBaseDark;
+    visual.indicator_hex = colors.printing;
+    visual.value_override = 0;
+    return visual;
+  }
+
+  if (!stale_filament_stage_resolved_to_printing(snapshot) &&
+      (snapshot.ui_status == "loading" || snapshot.ui_status == "unloading")) {
     visual.main_hex = kRingBaseDark;
     visual.indicator_hex = colors.filament;
     visual.anim_kind = (snapshot.ui_status == "loading") ? RingAnimKind::kFilamentLoad
@@ -853,7 +879,8 @@ uint32_t stable_status_text_hex(const PrinterSnapshot& snapshot, const ArcColorS
   }
 
   // Filament
-  if (snapshot.ui_status == "loading" || snapshot.ui_status == "unloading") {
+  if (!stale_filament_stage_resolved_to_printing(snapshot) &&
+      (snapshot.ui_status == "loading" || snapshot.ui_status == "unloading")) {
     return colors.filament;
   }
 
@@ -930,8 +957,12 @@ std::string lifecycle_label(const PrinterSnapshot& snapshot) {
   }
   // Let filament ui_status (loading/unloading) take priority over has_error,
   // because Bambu sends user-prompt error codes during filament changes.
-  if (snapshot.ui_status == "loading" || snapshot.ui_status == "unloading") {
+  if (!stale_filament_stage_resolved_to_printing(snapshot) &&
+      (snapshot.ui_status == "loading" || snapshot.ui_status == "unloading")) {
     return snapshot.ui_status;
+  }
+  if (stale_filament_stage_resolved_to_printing(snapshot)) {
+    return "printing";
   }
   if (snapshot.connection == PrinterConnectionState::kError || snapshot.has_error ||
       snapshot.lifecycle == PrintLifecycleState::kError) {
@@ -1035,8 +1066,22 @@ std::string titlecase_stage_text(std::string value) {
 
 std::string current_operation_text(const PrinterSnapshot& snapshot) {
   const std::string status = lower_ui_text(snapshot.ui_status);
-  const std::string stage = lower_ui_text(!snapshot.raw_stage.empty() ? snapshot.raw_stage
-                                                                      : snapshot.stage);
+  const std::string raw_stage = lower_ui_text(snapshot.raw_stage);
+  const std::string display_stage = lower_ui_text(snapshot.stage);
+  const std::string stage = !raw_stage.empty() ? raw_stage : display_stage;
+  if (stale_filament_stage_resolved_to_printing(snapshot)) {
+    return {};
+  }
+  const bool resumed_printing =
+      snapshot.lifecycle == PrintLifecycleState::kPrinting && snapshot.current_layer > 0 &&
+      (status == "printing" || status == "running" || ui_text_contains(status, "print"));
+  if (resumed_printing &&
+      (ui_text_contains(stage, "filament_loading") ||
+       ui_text_contains(stage, "filament_unloading") ||
+       ui_text_contains(stage, "changing_filament") ||
+       ui_text_contains(stage, "changing filament"))) {
+    return {};
+  }
 
   if (status == "downloading" || ui_text_contains(stage, "download")) return "Downloading model";
   if (ui_text_contains(stage, "heating_chamber") ||
@@ -2273,7 +2318,10 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   const std::string operation_text = current_operation_text(snapshot);
   std::string status_text = operation_text;
   const int displayed_progress =
-      (!operation_text.empty() && snapshot.current_layer == 0) ? 0 : progress;
+      ((!operation_text.empty() && snapshot.current_layer == 0) ||
+       stale_print_start_progress(snapshot, progress))
+          ? 0
+          : progress;
   std::snprintf(progress_buffer, sizeof(progress_buffer), "%d%%", displayed_progress);
   set_label_text_if_changed(progress_label_, progress_buffer);
   if (status_text.empty()) {

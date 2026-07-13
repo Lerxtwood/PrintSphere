@@ -3205,6 +3205,9 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
     const PrintLifecycleState previous_lifecycle = runtime.lifecycle;
     const bool previous_non_error_stop = runtime.non_error_stop;
     const bool previous_has_error = runtime.has_error;
+    const std::string previous_raw_stage = text_string(runtime.raw_stage);
+    const int previous_tray_now = runtime.tray_now;
+    const int previous_left_tray_now = runtime.left_tray_now;
     runtime.configured = true;
     runtime.connected = true;
     runtime.capabilities = cloud_live_capabilities();
@@ -3241,6 +3244,19 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
           stage_text = known_operation_stage;
         }
       }
+      const SnowTrayInfo right_snow = extract_extruder_snow_tray_info(print);
+      const SnowTrayInfo left_snow = extract_extruder_snow_tray_info(print, 1);
+      const bool right_snow_newly_settled =
+          right_snow.mapped_tray >= 0 && right_snow.mapped_tray != 254 &&
+          right_snow.mapped_tray != previous_tray_now;
+      const bool left_snow_newly_settled =
+          left_snow.mapped_tray >= 0 && left_snow.mapped_tray != 254 &&
+          left_snow.mapped_tray != previous_left_tray_now;
+      const bool snow_filament_change_finished =
+          is_filament_stage(previous_raw_stage) &&
+          (stage_text.empty() || is_filament_stage(stage_text) ||
+           stage_text == "printing" || stage_text == "Printing") &&
+          (right_snow_newly_settled || left_snow_newly_settled);
       const bool has_status_update = !status_text.empty() || !stage_text.empty();
     if (cloud_payload_probe_logs_remaining_.load() > 0) {
       const cJSON* ams_obj = cJSON_GetObjectItemCaseSensitive(print, "ams");
@@ -3287,6 +3303,16 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
     } else if (!status_text.empty() && lifecycle == PrintLifecycleState::kPrinting) {
       copy_text(&runtime.raw_stage, "");
       copy_text(&runtime.stage, cloud_stage_label_for(status_text, lifecycle));
+    }
+    if (snow_filament_change_finished) {
+      ESP_LOGI(kTag,
+               "Clearing stale cloud filament stage after snow settled "
+               "(right %d->%d left %d->%d, previous stage '%s')",
+               previous_tray_now, right_snow.mapped_tray,
+               previous_left_tray_now, left_snow.mapped_tray,
+               previous_raw_stage.empty() ? "(-)" : previous_raw_stage.c_str());
+      copy_text(&runtime.raw_stage, "");
+      copy_text(&runtime.stage, "Printing");
     }
 
     const std::string subtask_name = trim_job_name_cloud(
@@ -3434,13 +3460,11 @@ void BambuCloudClient::handle_report_payload(const char* payload, size_t length)
       runtime.tray_tar = json_int(ams_obj, "tray_tar", runtime.tray_tar);
 
       // V2 protocol override: P2S/H2 series send device.extruder.info[].snow.
-        const SnowTrayInfo right_snow = extract_extruder_snow_tray_info(print);
         if (right_snow.mapped_tray >= 0 && right_snow.mapped_tray != runtime.tray_now) {
           ESP_LOGI(kTag, "cloud tray_now override from snow: ams.tray_now=%d -> snow=%d",
                    runtime.tray_now, right_snow.mapped_tray);
           runtime.tray_now = right_snow.mapped_tray;
         }
-        const SnowTrayInfo left_snow = extract_extruder_snow_tray_info(print, 1);
         if (left_snow.mapped_tray >= 0 && left_snow.mapped_tray != runtime.left_tray_now) {
           ESP_LOGI(kTag, "cloud left tray_now from snow: %d->%d",
                    runtime.left_tray_now, left_snow.mapped_tray);

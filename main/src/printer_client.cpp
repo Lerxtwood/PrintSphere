@@ -2042,6 +2042,8 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     const PrintLifecycleState previous_lifecycle = runtime.lifecycle;
     const int previous_print_error_code = runtime.print_error_code;
     const uint16_t previous_hms_alert_count = runtime.hms_alert_count;
+    const float previous_progress_percent = runtime.progress_percent;
+    const uint16_t previous_current_layer = runtime.current_layer;
     const bool previous_pause_fault = runtime.has_error && is_paused_gcode_state(previous_raw_status);
     const bool previous_ams_change_latched = runtime.ams_filament_change_latched;
     const int previous_hw_switch_state = runtime.hw_switch_state;
@@ -2108,15 +2110,23 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
       runtime.ams_status_main = ams_status_main;
     }
     const bool stage_id_generic = (stage_id == 0 || stage_id == -1 || stage_id == 255);
+    const bool tray_seated_for_clear = new_tray_now >= 0 && new_tray_now == new_tray_tar;
     const bool active_print_placeholder_packet =
-        raw_ams_status < 0 &&
         is_active_gcode_state(effective_gcode_state) &&
         stage_id_generic &&
         (is_placeholder_stage_name(stage_name) || lower_copy(stage_name) == "printing") &&
         is_filament_change_stage(previous_raw_stage);
-    if (active_print_placeholder_packet && runtime.ams_filament_change_latched) {
+    const bool explicit_done_signal =
+        raw_ams_status >= 0 &&
+        (!ams_filament_change ||
+         (has_hw_switch_state_update && has_tray_now_update && has_tray_tar_update &&
+          new_hw_switch_state == 1 && tray_seated_for_clear));
+    const bool stale_change_can_clear = raw_ams_status < 0 || explicit_done_signal;
+    if (active_print_placeholder_packet && runtime.ams_filament_change_latched &&
+        stale_change_can_clear) {
       ESP_LOGI(kTag, "Clearing stale AMS filament-change latch on active print placeholder");
       runtime.ams_filament_change_latched = false;
+      runtime.ams_status_main = 0;
     }
     const bool ams_change_active = runtime.ams_filament_change_latched;
     const int effective_stage_id = (ams_change_active && stage_id_generic) ? 4 : stage_id;
@@ -2215,6 +2225,24 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
         extract_chamber_target_temperature_c(print, runtime.chamber_target_temp_c);
     runtime.current_layer = extract_current_layer_local(print, runtime.current_layer);
     runtime.total_layers = extract_total_layers_local(print, runtime.total_layers);
+    const bool print_progress_advanced =
+        has_progress_update && !progress_is_download_related &&
+        runtime.progress_percent > previous_progress_percent + 0.05f;
+    const bool print_layer_advanced =
+        previous_current_layer > 0 && runtime.current_layer > previous_current_layer;
+    const bool stale_change_cleared_after_progress =
+        runtime.ams_filament_change_latched && active_print_placeholder_packet &&
+        (print_progress_advanced || print_layer_advanced);
+    if (stale_change_cleared_after_progress) {
+      ESP_LOGI(kTag,
+               "Clearing stale AMS filament-change latch after print progress resumed "
+               "(progress %.2f->%.2f layer %u->%u)",
+               static_cast<double>(previous_progress_percent),
+               static_cast<double>(runtime.progress_percent),
+               previous_current_layer, runtime.current_layer);
+      runtime.ams_filament_change_latched = false;
+      runtime.ams_status_main = 0;
+    }
     runtime.local_model = detect_printer_model_from_payload(print, runtime.local_model);
     runtime.chamber_light_supported =
         runtime.chamber_light_supported || printer_model_has_chamber_light(runtime.local_model);
@@ -2558,7 +2586,9 @@ void PrinterClient::handle_report_payload(const char* payload, size_t length) {
     }
 
     copy_text(&runtime.raw_status, has_status_update ? gcode_state : previous_raw_status);
-    if (has_stage_update) {
+    if (stale_change_cleared_after_progress) {
+      copy_text(&runtime.raw_stage, "");
+    } else if (has_stage_update) {
       copy_text(&runtime.raw_stage, resolved_stage);
     } else if (is_active_gcode_state(effective_gcode_state) && stage_idle_placeholder) {
       // Active Bambu jobs often emit transient "-1/255 => idle" stage packets between
