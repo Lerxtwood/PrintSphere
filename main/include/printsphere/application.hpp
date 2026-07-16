@@ -58,6 +58,7 @@ class Application {
   int audio_last_print_error_code_ = 0;
   size_t audio_last_hms_count_ = 0;
   bool audio_state_primed_ = false;
+  bool sticky_printing_active_ = false;
 };
 
 }  // namespace printsphere

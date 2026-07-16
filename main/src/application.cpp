@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "printsphere/bambu_status.hpp"
 #include "printsphere/error_lookup.hpp"
 #include "printsphere/status_resolver.hpp"
 #include "printsphere/time_sync.hpp"
@@ -69,6 +70,45 @@ bool cloud_print_is_live(const BambuCloudSnapshot& snapshot) {
 
 bool tick_deadline_active(TickType_t deadline, TickType_t now) {
   return deadline != 0 && static_cast<int32_t>(deadline - now) > 0;
+}
+
+bool snapshot_should_release_sticky_printing(const PrinterSnapshot& snapshot) {
+  if (snapshot.non_error_stop || snapshot.has_error) {
+    return true;
+  }
+  return snapshot.lifecycle == PrintLifecycleState::kFinished ||
+         snapshot.lifecycle == PrintLifecycleState::kError;
+}
+
+bool snapshot_should_enter_sticky_printing(const PrinterSnapshot& snapshot) {
+  if (snapshot_should_release_sticky_printing(snapshot)) {
+    return false;
+  }
+
+  if (snapshot.lifecycle == PrintLifecycleState::kPrinting || snapshot.ui_status == "printing") {
+    return true;
+  }
+
+  if (bambu_status_is_printing(snapshot.raw_status) || snapshot.current_layer > 0U) {
+    return true;
+  }
+
+  if (snapshot.progress_percent > 0.0f && snapshot.progress_percent < 100.0f) {
+    return true;
+  }
+
+  return snapshot.remaining_seconds > 0U &&
+         (is_filament_stage(snapshot.raw_stage) || is_filament_stage(snapshot.stage));
+}
+
+void apply_sticky_printing(PrinterSnapshot* snapshot) {
+  if (snapshot == nullptr) {
+    return;
+  }
+  snapshot->lifecycle = PrintLifecycleState::kPrinting;
+  snapshot->print_active = true;
+  snapshot->ui_status = "printing";
+  snapshot->stage = "Printing";
 }
 
 PrinterModel preferred_model_for_routing(const PrinterSnapshot& local_snapshot,
@@ -741,6 +781,16 @@ void Application::run() {
     }
 
     resolve_ui_state(snapshot);
+    if (sticky_printing_active_) {
+      if (snapshot_should_release_sticky_printing(snapshot)) {
+        sticky_printing_active_ = false;
+      } else {
+        apply_sticky_printing(&snapshot);
+      }
+    } else if (snapshot_should_enter_sticky_printing(snapshot)) {
+      sticky_printing_active_ = true;
+      apply_sticky_printing(&snapshot);
+    }
     // Store portal state first (lock-free), then apply_snapshot uses it
     // inside the same LVGL lock section — eliminates a separate lock acquisition.
     ui_.set_portal_access_state(portal_access.lock_enabled,
