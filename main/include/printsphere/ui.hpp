@@ -42,6 +42,7 @@ class Ui {
   esp_err_t initialize();
   void set_arc_color_scheme(const ArcColorScheme& colors);
   void set_status_icon_theme(StatusIconTheme theme);
+  void set_preview_center_mode(PreviewCenterMode mode);
   void apply_snapshot(const PrinterSnapshot& snapshot);
   void update_power_save(bool on_battery, bool keep_awake);
   void set_battery_display_policy(const BatteryDisplayPolicy& policy);
@@ -222,6 +223,8 @@ class Ui {
   lv_obj_t* badge_slot_ = nullptr;
   lv_obj_t* logo_badge_ = nullptr;
   lv_obj_t* logo_image_ = nullptr;
+  lv_obj_t* logo_ams_card_ = nullptr;
+  lv_obj_t* logo_ams_card_label_ = nullptr;
   lv_obj_t* status_art_badge_ = nullptr;
   lv_obj_t* status_art_icon_label_ = nullptr;
   lv_obj_t* status_art_dot_ = nullptr;
@@ -252,6 +255,8 @@ class Ui {
   lv_obj_t* brightness_overlay_ = nullptr;
   lv_obj_t* page2_shell_ = nullptr;
   lv_obj_t* page2_image_ = nullptr;
+  lv_obj_t* page2_ams_card_ = nullptr;
+  lv_obj_t* page2_ams_card_label_ = nullptr;
   lv_obj_t* page2_note_ = nullptr;
   lv_obj_t* page2_subnote_ = nullptr;
   // Print-control buttons on the preview page. Visible while a job is in
@@ -284,6 +289,8 @@ class Ui {
   bool accent_initialized_ = false;
   bool preview_page_available_ = true;
   bool preview_image_visible_ = false;
+  bool preview_ams_card_visible_ = false;
+  bool logo_ams_card_visible_ = false;
   bool preview_text_image_mode_ = false;
   bool camera_page_available_ = true;
   bool camera_image_visible_ = false;
@@ -309,6 +316,7 @@ class Ui {
   int last_parallax_clamped_ = -1;
   ArcColorScheme arc_colors_{};
   StatusIconTheme status_icon_theme_ = StatusIconTheme::kBasic;
+  PreviewCenterMode preview_center_mode_ = PreviewCenterMode::kPrintImage;
   uint32_t status_art_accent_hex_ = 0x2FF28A;
   uint32_t last_accent_hex_ = 0;
   uint32_t last_ring_main_hex_ = UINT32_MAX;

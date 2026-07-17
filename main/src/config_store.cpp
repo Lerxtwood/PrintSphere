@@ -199,6 +199,24 @@ StatusIconTheme parse_status_icon_theme(const std::string& value) {
   return StatusIconTheme::kBasic;
 }
 
+const char* to_string(PreviewCenterMode mode) {
+  switch (mode) {
+    case PreviewCenterMode::kAmsInfo:
+      return "ams_info";
+    case PreviewCenterMode::kPrintImage:
+    default:
+      return "print_image";
+  }
+}
+
+PreviewCenterMode parse_preview_center_mode(const std::string& value) {
+  if (value == "ams_info" || value == "ams" || value == "filament" ||
+      value == "color" || value == "amsinfo") {
+    return PreviewCenterMode::kAmsInfo;
+  }
+  return PreviewCenterMode::kPrintImage;
+}
+
 esp_err_t ConfigStore::initialize() {
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -367,6 +385,10 @@ StatusIconTheme ConfigStore::load_status_icon_theme() const {
   return parse_status_icon_theme(load_string("status_icons"));
 }
 
+PreviewCenterMode ConfigStore::load_preview_center_mode() const {
+  return parse_preview_center_mode(load_string("preview_center"));
+}
+
 BatteryDisplayPolicy ConfigStore::load_battery_display_policy() const {
   BatteryDisplayPolicy policy;
   policy.dim_enabled = parse_bool_or_default(load_string("bat_dim"), true);
@@ -477,6 +499,10 @@ esp_err_t ConfigStore::save_timezone_iana(const std::string& iana_name) const {
 
 esp_err_t ConfigStore::save_status_icon_theme(StatusIconTheme theme) const {
   return save_string("status_icons", to_string(theme));
+}
+
+esp_err_t ConfigStore::save_preview_center_mode(PreviewCenterMode mode) const {
+  return save_string("preview_center", to_string(mode));
 }
 
 esp_err_t ConfigStore::save_arc_color_scheme(const ArcColorScheme& colors) const {

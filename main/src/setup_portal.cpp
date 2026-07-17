@@ -1417,6 +1417,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   const SourceMode source_mode = portal->config_store_.load_source_mode();
   const DisplayRotation display_rotation = portal->config_store_.load_display_rotation();
   const StatusIconTheme status_icon_theme = portal->config_store_.load_status_icon_theme();
+  const PreviewCenterMode preview_center_mode = portal->config_store_.load_preview_center_mode();
   const bool portal_lock_enabled = portal->config_store_.load_portal_lock_enabled();
   const bool filament_wake = portal->config_store_.load_filament_wake_enabled();
   const bool filament_anim = portal->config_store_.load_filament_anim_enabled();
@@ -1538,11 +1539,13 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           : (status_icon_theme == StatusIconTheme::kShowcase
                  ? "Showcase"
                  : (status_icon_theme == StatusIconTheme::kMotion ? "Motion" : "Basic"));
+  const std::string preview_center_badge_value =
+      preview_center_mode == PreviewCenterMode::kAmsInfo ? "AMS Info" : "Print Image";
   const std::string ams_display_badge_value = filament_wake || !filament_anim ? "On" : "Off";
   const char* ams_display_badge_class = filament_wake || !filament_anim ? "info" : "idle";
   const std::string arc_badge_value = arc_colors_custom ? "Custom" : "Default";
   const char* arc_badge_class = arc_colors_custom ? "info" : "idle";
-  const int device_settings_count = show_connection_steps ? 5 : 4;
+  const int device_settings_count = show_connection_steps ? 6 : 5;
   const std::string device_settings_badge_value =
       std::to_string(device_settings_count) + (device_settings_count == 1 ? " Panel" : " Panels");
   const bool device_settings_section_open = true;
@@ -1951,6 +1954,24 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
     }
     html += ">Showcase Motion: animated AMOLED artwork</option></select>";
     html += "<div class=\"micro\">Basic uses compact symbols, Motion adds lightweight LVGL animation, Showcase uses richer bitmap artwork, and Showcase Motion animates that artwork live.</div></div>";
+    end_settings_panel();
+
+    begin_settings_panel(
+        "Print Center Content",
+        "Choose what page 2 shows in the center while a print is active.",
+        preview_center_badge_value, "info", false);
+    html += "<div class=\"field\"><label for=\"print_center_mode\">During Printing</label><select id=\"print_center_mode\">";
+    html += "<option value=\"print_image\"";
+    if (preview_center_mode == PreviewCenterMode::kPrintImage) {
+      html += " selected";
+    }
+    html += ">Print Image</option>";
+    html += "<option value=\"ams_info\"";
+    if (preview_center_mode == PreviewCenterMode::kAmsInfo) {
+      html += " selected";
+    }
+    html += ">AMS Info</option></select>";
+    html += "<div class=\"micro\">Print Image keeps the cloud cover preview. AMS Info swaps that center area for the active filament color and slot details during the job.</div></div>";
     end_settings_panel();
 
     begin_settings_panel(
@@ -2624,6 +2645,8 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += to_string(display_rotation);
   html += "\",status_icon_theme:\"";
   html += to_string(status_icon_theme);
+  html += "\",print_center_mode:\"";
+  html += to_string(preview_center_mode);
   html += "\",portal_lock_enabled:";
   html += portal_lock_enabled ? "true" : "false";
   html += ",printer_host:\"";
@@ -2905,6 +2928,7 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "cloud_password:(document.getElementById('cloud_password')?valueOf('cloud_password'):''),"
           "display_rotation:(document.getElementById('display_rotation')?valueOf('display_rotation'):savedConfig.display_rotation)||'0',"
           "status_icon_theme:(document.getElementById('status_icon_theme')?valueOf('status_icon_theme'):savedConfig.status_icon_theme)||'basic',"
+          "print_center_mode:(document.getElementById('print_center_mode')?valueOf('print_center_mode'):savedConfig.print_center_mode)||'print_image',"
           "portal_lock_enabled:(document.getElementById('portal_lock_enabled')?valueOf('portal_lock_enabled')==='true':savedConfig.portal_lock_enabled!==false),"
           "filament_wake:(document.getElementById('filament_wake')?valueOf('filament_wake')==='true':savedConfig.filament_wake===true),"
           "filament_anim:(document.getElementById('filament_anim')?valueOf('filament_anim')==='true':savedConfig.filament_anim!==false),"
@@ -3610,6 +3634,7 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   const SourceMode source_mode = portal->config_store_.load_source_mode();
   const DisplayRotation display_rotation = portal->config_store_.load_display_rotation();
   const StatusIconTheme status_icon_theme = portal->config_store_.load_status_icon_theme();
+  const PreviewCenterMode preview_center_mode = portal->config_store_.load_preview_center_mode();
   const bool portal_lock_enabled = portal->config_store_.load_portal_lock_enabled();
   const PrinterConnection printer = portal->config_store_.load_active_printer_profile().to_connection();
   const ArcColorScheme arc_colors = portal->config_store_.load_arc_color_scheme();
@@ -3641,9 +3666,12 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   body += "\",";
   body += "\"display_rotation\":\"";
   body += to_string(display_rotation);
-  body += "\",";
+  body += "\","; 
   body += "\"status_icon_theme\":\"";
   body += to_string(status_icon_theme);
+  body += "\",";
+  body += "\"print_center_mode\":\"";
+  body += to_string(preview_center_mode);
   body += "\",";
   body += "\"portal_lock_enabled\":";
   body += portal_lock_enabled ? "true" : "false";
@@ -3735,6 +3763,11 @@ esp_err_t SetupPortal::handle_config_post(httpd_req_t* request) {
   const StatusIconTheme status_icon_theme = status_icon_theme_field.empty()
       ? portal->config_store_.load_status_icon_theme()
       : parse_status_icon_theme(status_icon_theme_field);
+  const std::string preview_center_mode_field =
+      trim_copy(read_string_field(root, "print_center_mode"));
+  const PreviewCenterMode preview_center_mode = preview_center_mode_field.empty()
+      ? portal->config_store_.load_preview_center_mode()
+      : parse_preview_center_mode(preview_center_mode_field);
   const bool portal_lock_enabled =
       read_bool_field(root, "portal_lock_enabled", stored_portal_lock_enabled);
   const bool filament_wake =
@@ -3825,6 +3858,8 @@ esp_err_t SetupPortal::handle_config_post(httpd_req_t* request) {
                       "save display rotation failed");
   ESP_RETURN_ON_ERROR(portal->config_store_.save_status_icon_theme(status_icon_theme), kTag,
                       "save status icon theme failed");
+  ESP_RETURN_ON_ERROR(portal->config_store_.save_preview_center_mode(preview_center_mode), kTag,
+                      "save preview center mode failed");
   ESP_RETURN_ON_ERROR(portal->config_store_.save_portal_lock_enabled(portal_lock_enabled), kTag,
                       "save portal lock failed");
   ESP_RETURN_ON_ERROR(portal->config_store_.save_filament_wake_enabled(filament_wake), kTag,

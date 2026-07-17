@@ -73,6 +73,8 @@ constexpr int kPage2PreviewYOffset = -12;
 constexpr int kPage2NoteWithImageY = 138;
 constexpr int kPage2SubnoteWithImageY = 188;
 #endif
+constexpr int kPage2AmsCardSize = 220;
+constexpr int kLogoAmsCardSize = 96;
 constexpr int kPage3CameraWidth = 400;
 constexpr int kPage3CameraHeight = 224;
 constexpr int kPage3CameraYOffset = 0;
@@ -623,6 +625,94 @@ uint32_t scale_color(uint32_t color, uint16_t scale_0_to_255) {
   const uint8_t sb =
       static_cast<uint8_t>((static_cast<uint32_t>(b) * scale_0_to_255 + 127U) / 255U);
   return (static_cast<uint32_t>(sr) << 16) | (static_cast<uint32_t>(sg) << 8) | sb;
+}
+
+bool color_is_dark(uint32_t rgb_hex) {
+  return ((rgb_hex >> 16) & 0xFF) * 299 + ((rgb_hex >> 8) & 0xFF) * 587 +
+             (rgb_hex & 0xFF) * 114 <
+         128000;
+}
+
+std::string active_ams_material_label(const AmsTrayInfo& tray) {
+  if (!tray.material_name.empty()) {
+    return tray.material_name;
+  }
+  if (!tray.material_type.empty()) {
+    return tray.material_type;
+  }
+  return "Current filament";
+}
+
+struct PreviewAmsCardInfo {
+  bool available = false;
+  uint32_t rgb_hex = 0x444444;
+  std::string note;
+  std::string subnote;
+  std::string card_text;
+};
+
+bool populate_active_ams_card_from_bank(const std::shared_ptr<AmsSnapshot>& ams_snapshot,
+                                        int active_key, const char* bank_prefix,
+                                        PreviewAmsCardInfo* info) {
+  if (!ams_snapshot || info == nullptr || active_key < 0) {
+    return false;
+  }
+
+  if (active_key == 254 && ams_snapshot->external_spool.present) {
+    const AmsTrayInfo& ext = ams_snapshot->external_spool;
+    info->available = true;
+    info->rgb_hex = ext.color_rgba != 0 ? ((ext.color_rgba >> 8) & 0x00FFFFFFU) : 0x444444;
+    info->note = active_ams_material_label(ext);
+    info->subnote = bank_prefix != nullptr && bank_prefix[0] != '\0'
+                         ? std::string(bank_prefix) + "external spool"
+                         : "External spool";
+    info->card_text = "EXT";
+    return true;
+  }
+
+  for (uint8_t unit_idx = 0; unit_idx < ams_snapshot->count && unit_idx < kMaxAmsUnits; ++unit_idx) {
+    const AmsUnitInfo& unit = ams_snapshot->units[unit_idx];
+    for (int tray_idx = 0; tray_idx < kMaxAmsTrays; ++tray_idx) {
+      const AmsTrayInfo& tray = unit.trays[tray_idx];
+      if (!tray.present) {
+        continue;
+      }
+      const int slot_key = unit.single_tray ? unit.raw_id : unit_idx * kMaxAmsTrays + tray_idx;
+      if (slot_key != active_key) {
+        continue;
+      }
+      info->available = true;
+      info->rgb_hex = tray.color_rgba != 0 ? ((tray.color_rgba >> 8) & 0x00FFFFFFU) : 0x444444;
+      info->note = active_ams_material_label(tray);
+      info->subnote = std::string(bank_prefix != nullptr ? bank_prefix : "") + "AMS " +
+                      std::to_string(static_cast<unsigned>(unit_idx + 1U)) +
+                      (unit.single_tray ? "" : (" Slot " + std::to_string(tray_idx + 1)));
+      info->card_text = unit.single_tray ? ("AMS " + std::to_string(static_cast<unsigned>(unit_idx + 1U)))
+                                         : ("SLOT " + std::to_string(tray_idx + 1));
+      return true;
+    }
+  }
+
+  return false;
+}
+
+PreviewAmsCardInfo preview_ams_card_info(const PrinterSnapshot& snapshot) {
+  PreviewAmsCardInfo info;
+  if (snapshot.active_nozzle_index == 1) {
+    if (populate_active_ams_card_from_bank(snapshot.left_ams, snapshot.left_tray_now, "Left ", &info)) {
+      return info;
+    }
+    populate_active_ams_card_from_bank(snapshot.ams, snapshot.tray_now, "", &info);
+    return info;
+  }
+
+  if (populate_active_ams_card_from_bank(snapshot.ams, snapshot.tray_now, "", &info)) {
+    return info;
+  }
+  if (populate_active_ams_card_from_bank(snapshot.left_ams, snapshot.left_tray_now, "Left ", &info)) {
+    return info;
+  }
+  return info;
 }
 
 uint32_t hash_mix(uint32_t hash, uint32_t value) {
@@ -1635,6 +1725,10 @@ void Ui::set_status_icon_theme(StatusIconTheme theme) {
   status_icon_theme_ = theme;
 }
 
+void Ui::set_preview_center_mode(PreviewCenterMode mode) {
+  preview_center_mode_ = mode;
+}
+
 esp_err_t Ui::initialize() {
   if (initialized_) {
     return ESP_OK;
@@ -2120,7 +2214,13 @@ void Ui::apply_snapshot(const PrinterSnapshot& snapshot) {
   std::shared_ptr<std::vector<uint8_t>> pre_decoded_raw;
   lv_image_dsc_t pre_decoded_dsc{};
   const bool preview_page_active = !scrolling_ && active_page_ == kPageIdxPreview;
-  const bool preview_image_wanted = preview_page_active || snapshot.print_active;
+  const bool preview_job_active =
+      snapshot.print_active || snapshot.lifecycle == PrintLifecycleState::kPreparing ||
+      snapshot.lifecycle == PrintLifecycleState::kPrinting ||
+      snapshot.lifecycle == PrintLifecycleState::kPaused;
+  const bool preview_image_wanted =
+      (preview_page_active || snapshot.print_active) &&
+      (preview_center_mode_ == PreviewCenterMode::kPrintImage || !preview_job_active);
   const bool preview_blob_changed =
       snapshot.preview_blob && !snapshot.preview_blob->empty() &&
       last_preview_blob_.get() != snapshot.preview_blob.get();
@@ -2559,12 +2659,20 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
 
   LvglLockGuard::note_phase("preview_text");
-  const std::string preview_note = preview_note_text(snapshot);
-  const std::string preview_subnote = preview_subnote_text(snapshot);
+  const bool preview_job_active =
+      snapshot.print_active || snapshot.lifecycle == PrintLifecycleState::kPreparing ||
+      snapshot.lifecycle == PrintLifecycleState::kPrinting ||
+      snapshot.lifecycle == PrintLifecycleState::kPaused;
+  const bool show_preview_ams_info =
+      preview_center_mode_ == PreviewCenterMode::kAmsInfo && preview_job_active;
+  const PreviewAmsCardInfo ams_card = show_preview_ams_info ? preview_ams_card_info(snapshot)
+                                                            : PreviewAmsCardInfo{};
+  std::string preview_note = preview_note_text(snapshot);
+  std::string preview_subnote = preview_subnote_text(snapshot);
   const std::string camera_note = camera_note_text(snapshot);
   const std::string camera_subnote = camera_subnote_text(snapshot);
   bool has_preview_image = false;
-  if (snapshot.preview_blob && !snapshot.preview_blob->empty()) {
+  if (!show_preview_ams_info && snapshot.preview_blob && !snapshot.preview_blob->empty()) {
     const bool preview_blob_changed = last_preview_blob_.get() != snapshot.preview_blob.get();
     last_preview_blob_ = snapshot.preview_blob;
     const bool preview_image_wanted = active_page_ == kPageIdxPreview || snapshot.print_active;
@@ -2581,19 +2689,37 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     }
     last_preview_blob_.reset();
   }
-  const bool has_page2_image = has_preview_image;
-  preview_image_visible_ = has_page2_image;
+  const bool show_ams_card = show_preview_ams_info && ams_card.available;
+  if (show_ams_card && page2_ams_card_ != nullptr && page2_ams_card_label_ != nullptr) {
+    const uint32_t card_rgb = ams_card.rgb_hex != 0 ? ams_card.rgb_hex : 0x444444;
+    const bool dark_card = color_is_dark(card_rgb);
+    lv_obj_set_style_bg_color(page2_ams_card_, lv_color_hex(card_rgb), 0);
+    lv_obj_set_style_text_color(page2_ams_card_label_,
+                                lv_color_hex(dark_card ? 0xFFFFFF : 0x061018), 0);
+    set_label_text_if_changed(page2_ams_card_label_, ams_card.card_text);
+    preview_note = ams_card.note;
+    preview_subnote = ams_card.subnote;
+  } else if (show_preview_ams_info) {
+    preview_note = "Waiting for active filament";
+    preview_subnote = !snapshot.job_name.empty() ? snapshot.job_name : "No AMS color reported yet";
+  }
 
-  if (preview_text_image_mode_ != has_page2_image) {
-    if (has_page2_image) {
-      // Note is hidden when cover is loaded; subnote (title) moves to former note position.
+  const bool has_page2_center_art = has_preview_image || show_ams_card;
+  preview_image_visible_ = has_preview_image;
+  preview_ams_card_visible_ = show_ams_card;
+
+  if (has_page2_center_art) {
+    if (has_preview_image) {
       lv_obj_align(page2_subnote_, LV_ALIGN_CENTER, 0, kPage2NoteWithImageY);
     } else {
-      lv_obj_align(page2_note_, LV_ALIGN_CENTER, 0, -14);
-      lv_obj_align(page2_subnote_, LV_ALIGN_CENTER, 0, 18);
+      lv_obj_align(page2_note_, LV_ALIGN_CENTER, 0, kPage2NoteWithImageY);
+      lv_obj_align(page2_subnote_, LV_ALIGN_CENTER, 0, kPage2SubnoteWithImageY);
     }
-    preview_text_image_mode_ = has_page2_image;
+  } else {
+    lv_obj_align(page2_note_, LV_ALIGN_CENTER, 0, -14);
+    lv_obj_align(page2_subnote_, LV_ALIGN_CENTER, 0, 18);
   }
+  preview_text_image_mode_ = has_page2_center_art;
   set_hidden(page2_note_, preview_note.empty());
   if (!preview_note.empty()) {
     set_label_text_if_changed(page2_note_, preview_note);
@@ -2606,7 +2732,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   // and on the preview page it competes with large image redraws under the
   // display lock. Use a static dotted title instead.
   {
-    const bool image_title = active_page_ == kPageIdxPreview && has_page2_image;
+    const bool image_title = active_page_ == kPageIdxPreview && has_page2_center_art;
     const lv_label_long_mode_t desired = image_title ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP;
     if (lv_label_get_long_mode(page2_subnote_) != desired) {
       lv_label_set_long_mode(page2_subnote_, desired);
@@ -2705,11 +2831,42 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   const bool actively_printing =
       snapshot.lifecycle == PrintLifecycleState::kPrinting &&
       (snapshot.current_layer > 0 || snapshot.progress_percent >= 1.0f);
+  const bool use_logo_ams_card =
+      actively_printing && !use_status_art &&
+      preview_center_mode_ == PreviewCenterMode::kAmsInfo;
   const bool use_preview_logo =
-      actively_printing && !use_status_art && has_preview_image && last_preview_raw_ &&
+      actively_printing && !use_logo_ams_card && !use_status_art &&
+      has_preview_image && last_preview_raw_ &&
       !last_preview_raw_->empty();
+  const PreviewAmsCardInfo logo_ams_card =
+      use_logo_ams_card ? preview_ams_card_info(snapshot) : PreviewAmsCardInfo{};
+  logo_ams_card_visible_ = false;
   if (logo_image_ != nullptr) {
-    if (use_preview_logo) {
+    if (use_logo_ams_card && logo_ams_card_ != nullptr && logo_ams_card_label_ != nullptr) {
+      if (status_art_visible_) {
+        set_hidden(status_art_badge_, true);
+        status_art_visible_ = false;
+      }
+      if (logo_preview_active_) {
+        lv_image_set_src(logo_image_, &bambuicon_small);
+        lv_image_set_scale(logo_image_, 183);
+        logo_preview_active_ = false;
+      }
+      const uint32_t card_rgb = logo_ams_card.available && logo_ams_card.rgb_hex != 0
+                                    ? logo_ams_card.rgb_hex
+                                    : 0x2A3940;
+      const bool dark_card = color_is_dark(card_rgb);
+      lv_obj_set_style_bg_color(logo_ams_card_, lv_color_hex(card_rgb), 0);
+      lv_obj_set_style_text_color(logo_ams_card_label_,
+                                  lv_color_hex(dark_card ? 0xFFFFFF : 0x061018), 0);
+      set_label_text_if_changed(logo_ams_card_label_,
+                                logo_ams_card.available ? logo_ams_card.card_text
+                                                        : std::string("AMS\n..."));
+      set_hidden(logo_image_, true);
+      set_hidden(logo_ams_card_, false);
+      logo_ams_card_visible_ = true;
+    } else if (use_preview_logo) {
+      set_hidden(logo_ams_card_, true);
       if (status_art_visible_) {
         set_hidden(status_art_badge_, true);
         status_art_visible_ = false;
@@ -2805,6 +2962,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
         }
         set_hidden(status_art_badge_, false);
         set_hidden(logo_image_, true);
+        set_hidden(logo_ams_card_, true);
         status_art_visible_ = true;
       } else {
         if (status_art_visible_) {
@@ -2821,6 +2979,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
           last_status_art_key_.clear();
           last_status_art_theme_ = status_icon_theme_;
         }
+        set_hidden(logo_ams_card_, true);
         set_hidden(logo_image_, false);
       }
     }
@@ -3686,6 +3845,32 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_clear_flag(logo_image_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_clear_flag(logo_image_, LV_OBJ_FLAG_SCROLLABLE);
 
+  logo_ams_card_ = lv_obj_create(logo_badge_);
+  lv_obj_set_size(logo_ams_card_, kLogoAmsCardSize, kLogoAmsCardSize);
+  lv_obj_set_style_radius(logo_ams_card_, 28, 0);
+  lv_obj_set_style_border_width(logo_ams_card_, 2, 0);
+  lv_obj_set_style_border_color(logo_ams_card_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_border_opa(logo_ams_card_, LV_OPA_30, 0);
+  lv_obj_set_style_shadow_width(logo_ams_card_, 18, 0);
+  lv_obj_set_style_shadow_color(logo_ams_card_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_shadow_opa(logo_ams_card_, LV_OPA_30, 0);
+  lv_obj_set_style_pad_all(logo_ams_card_, 10, 0);
+  lv_obj_set_style_bg_color(logo_ams_card_, lv_color_hex(0x444444), 0);
+  lv_obj_set_style_bg_opa(logo_ams_card_, LV_OPA_COVER, 0);
+  lv_obj_center(logo_ams_card_);
+  lv_obj_clear_flag(logo_ams_card_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(logo_ams_card_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(logo_ams_card_, LV_OBJ_FLAG_HIDDEN);
+
+  logo_ams_card_label_ = lv_label_create(logo_ams_card_);
+  set_label_text_if_changed(logo_ams_card_label_, "");
+  lv_obj_set_width(logo_ams_card_label_, kLogoAmsCardSize - 18);
+  lv_label_set_long_mode(logo_ams_card_label_, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_align(logo_ams_card_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_font(logo_ams_card_label_, dosis32, 0);
+  lv_obj_set_style_text_color(logo_ams_card_label_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_center(logo_ams_card_label_);
+
   status_art_badge_ = lv_obj_create(logo_badge_);
   lv_obj_set_size(status_art_badge_, 82, 82);
   lv_obj_set_style_radius(status_art_badge_, LV_RADIUS_CIRCLE, 0);
@@ -4025,6 +4210,32 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_clear_flag(page2_image_, LV_OBJ_FLAG_SCROLLABLE);
   enable_touch_bubble(page2_image_);
 
+  page2_ams_card_ = lv_obj_create(page2_);
+  lv_obj_set_size(page2_ams_card_, kPage2AmsCardSize, kPage2AmsCardSize);
+  lv_obj_align(page2_ams_card_, LV_ALIGN_CENTER, 0, kPage2PreviewYOffset);
+  lv_obj_set_style_radius(page2_ams_card_, 34, 0);
+  lv_obj_set_style_border_width(page2_ams_card_, 2, 0);
+  lv_obj_set_style_border_color(page2_ams_card_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_border_opa(page2_ams_card_, LV_OPA_30, 0);
+  lv_obj_set_style_shadow_width(page2_ams_card_, 28, 0);
+  lv_obj_set_style_shadow_color(page2_ams_card_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_shadow_opa(page2_ams_card_, LV_OPA_30, 0);
+  lv_obj_set_style_pad_all(page2_ams_card_, 14, 0);
+  lv_obj_set_style_bg_color(page2_ams_card_, lv_color_hex(0x444444), 0);
+  lv_obj_set_style_bg_opa(page2_ams_card_, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(page2_ams_card_, LV_OBJ_FLAG_SCROLLABLE);
+  enable_touch_bubble(page2_ams_card_);
+  lv_obj_add_flag(page2_ams_card_, LV_OBJ_FLAG_HIDDEN);
+
+  page2_ams_card_label_ = lv_label_create(page2_ams_card_);
+  set_label_text_if_changed(page2_ams_card_label_, "");
+  lv_obj_set_width(page2_ams_card_label_, kPage2AmsCardSize - 40);
+  lv_label_set_long_mode(page2_ams_card_label_, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_align(page2_ams_card_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_font(page2_ams_card_label_, dosis32, 0);
+  lv_obj_set_style_text_color(page2_ams_card_label_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_center(page2_ams_card_label_);
+
   page2_note_ = lv_label_create(page2_);
   set_label_text_if_changed(page2_note_, "No cover image yet");
   lv_obj_set_width(page2_note_, 280);
@@ -4131,6 +4342,8 @@ esp_err_t Ui::build_dashboard() {
   deferred_snapshot_pending_ = false;
   detail_visible_ = true;
   show_logo_ = false;
+  preview_ams_card_visible_ = false;
+  logo_ams_card_visible_ = false;
   preview_text_image_mode_ = false;
   camera_text_image_mode_ = false;
   apply_page_visibility();
@@ -4178,6 +4391,8 @@ void Ui::apply_page_visibility() {
   set_hidden(badge_slot_, !on_page1);
   set_hidden(portal_hint_label_, !show_portal_hint);
   set_hidden(page2_image_, !on_page2 || !preview_image_visible_);
+  set_hidden(page2_ams_card_, !on_page2 || !preview_ams_card_visible_);
+  set_hidden(logo_ams_card_, !on_page1 || !show_logo_ || !logo_ams_card_visible_);
   set_hidden(page3_image_, !on_page3 || !camera_image_visible_);
 
   // Overlay + page0 opacity are driven by apply_page0_parallax.
@@ -4381,7 +4596,13 @@ void Ui::set_active_page(int page) {
     replay_card_animations_locked();
   }
   if (active_page_ == kPageIdxPreview) {
-    preview_image_visible_ = ensure_preview_image_loaded_locked(false);
+    const bool preview_job_active =
+        last_snapshot_.print_active || last_snapshot_.lifecycle == PrintLifecycleState::kPreparing ||
+        last_snapshot_.lifecycle == PrintLifecycleState::kPrinting ||
+        last_snapshot_.lifecycle == PrintLifecycleState::kPaused;
+    preview_image_visible_ =
+        (preview_center_mode_ == PreviewCenterMode::kPrintImage || !preview_job_active) &&
+        ensure_preview_image_loaded_locked(false);
   }
   if (previous_page != clamped_page && active_page_ == kPageIdxCamera &&
       camera_page_available_) {
