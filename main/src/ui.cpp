@@ -104,6 +104,10 @@ constexpr int32_t kCardRevealYStart = 28;
 constexpr uint32_t kCardRevealStaggerMs = 55U;
 constexpr uint32_t kRingBaseDark = 0x101010;
 constexpr uint32_t kRingIdleSolid = 0x404040;
+constexpr int kNozzleIconX = -182;
+constexpr int kNozzleIconCenteredY = -10;
+constexpr int kNozzleRowTopY = -28;
+constexpr int kNozzleRowBottomY = 8;
 constexpr char kDegreeC[] = "\xC2\xB0""C";
 constexpr char kDegree[] = "\xC2\xB0";
 constexpr char kMdiClock[] = "\xF3\xB1\x91\x8E";
@@ -643,6 +647,13 @@ std::string active_ams_material_label(const AmsTrayInfo& tray) {
   return "Current filament";
 }
 
+std::string active_ams_material_type_label(const AmsTrayInfo& tray) {
+  if (!tray.material_type.empty()) {
+    return tray.material_type;
+  }
+  return {};
+}
+
 struct PreviewAmsCardInfo {
   bool available = false;
   uint32_t rgb_hex = 0x444444;
@@ -660,13 +671,14 @@ bool populate_active_ams_card_from_bank(const std::shared_ptr<AmsSnapshot>& ams_
 
   if (active_key == 254 && ams_snapshot->external_spool.present) {
     const AmsTrayInfo& ext = ams_snapshot->external_spool;
+    const std::string material_type = active_ams_material_type_label(ext);
     info->available = true;
     info->rgb_hex = ext.color_rgba != 0 ? ((ext.color_rgba >> 8) & 0x00FFFFFFU) : 0x444444;
     info->note = active_ams_material_label(ext);
     info->subnote = bank_prefix != nullptr && bank_prefix[0] != '\0'
                          ? std::string(bank_prefix) + "external spool"
                          : "External spool";
-    info->card_text = "EXT";
+    info->card_text = material_type.empty() ? "EXT" : ("EXT\n" + material_type);
     return true;
   }
 
@@ -681,14 +693,17 @@ bool populate_active_ams_card_from_bank(const std::shared_ptr<AmsSnapshot>& ams_
       if (slot_key != active_key) {
         continue;
       }
+      const std::string material_type = active_ams_material_type_label(tray);
       info->available = true;
       info->rgb_hex = tray.color_rgba != 0 ? ((tray.color_rgba >> 8) & 0x00FFFFFFU) : 0x444444;
       info->note = active_ams_material_label(tray);
       info->subnote = std::string(bank_prefix != nullptr ? bank_prefix : "") + "AMS " +
                       std::to_string(static_cast<unsigned>(unit_idx + 1U)) +
                       (unit.single_tray ? "" : (" Slot " + std::to_string(tray_idx + 1)));
-      info->card_text = unit.single_tray ? ("AMS " + std::to_string(static_cast<unsigned>(unit_idx + 1U)))
-                                         : ("SLOT " + std::to_string(tray_idx + 1));
+      const std::string slot_label =
+          unit.single_tray ? ("AMS " + std::to_string(static_cast<unsigned>(unit_idx + 1U)))
+                           : ("SLOT " + std::to_string(tray_idx + 1));
+      info->card_text = material_type.empty() ? slot_label : (slot_label + "\n" + material_type);
       return true;
     }
   }
@@ -2577,6 +2592,8 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
     set_label_text_if_changed(nozzle_aux_label_, temp_buffer);
     nozzle_aux_visible_ = true;
     lv_obj_set_style_text_color(nozzle_aux_label_, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(nozzle_prefix_label_, LV_ALIGN_CENTER, kNozzleIconX,
+                 active_is_left ? kNozzleRowTopY : kNozzleRowBottomY);
   } else {
     lv_obj_set_style_text_font(nozzle_value_label_, &dosis_32, 0);
     lv_obj_set_style_text_font(nozzle_aux_label_, &dosis_32, 0);
@@ -2592,6 +2609,7 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
       set_label_text_if_changed(nozzle_aux_label_, nozzle_aux);
       lv_obj_set_style_text_color(nozzle_aux_label_, lv_color_hex(0x94A3B8), 0);
     }
+    lv_obj_align(nozzle_prefix_label_, LV_ALIGN_CENTER, kNozzleIconX, kNozzleIconCenteredY);
   }
 
   format_temperature(temp_buffer, sizeof(temp_buffer), "", snapshot.bed_temp_c,
@@ -3867,7 +3885,7 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_set_width(logo_ams_card_label_, kLogoAmsCardSize - 18);
   lv_label_set_long_mode(logo_ams_card_label_, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(logo_ams_card_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_font(logo_ams_card_label_, dosis32, 0);
+  lv_obj_set_style_text_font(logo_ams_card_label_, dosis20, 0);
   lv_obj_set_style_text_color(logo_ams_card_label_, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(logo_ams_card_label_);
 
@@ -4040,7 +4058,7 @@ esp_err_t Ui::build_dashboard() {
   set_label_text_if_changed(nozzle_prefix_label_, kMdiNozzle);
   lv_obj_set_style_text_font(nozzle_prefix_label_, mdi40, 0);
   lv_obj_set_style_text_color(nozzle_prefix_label_, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_align(nozzle_prefix_label_, LV_ALIGN_CENTER, -182, -10);
+  lv_obj_align(nozzle_prefix_label_, LV_ALIGN_CENTER, kNozzleIconX, kNozzleIconCenteredY);
 
   nozzle_value_label_ = lv_label_create(page1_);
   set_label_text_if_changed(nozzle_value_label_, "--°C");
@@ -4232,7 +4250,7 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_set_width(page2_ams_card_label_, kPage2AmsCardSize - 40);
   lv_label_set_long_mode(page2_ams_card_label_, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(page2_ams_card_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_font(page2_ams_card_label_, dosis32, 0);
+  lv_obj_set_style_text_font(page2_ams_card_label_, dosis20, 0);
   lv_obj_set_style_text_color(page2_ams_card_label_, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(page2_ams_card_label_);
 
