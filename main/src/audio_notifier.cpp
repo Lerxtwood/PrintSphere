@@ -79,7 +79,9 @@ constexpr Note kReconnectNotes[] = {
 };
 
 constexpr Note kClickNotes[] = {
-    {1800, 40},
+    // Make UI tap feedback easier to hear on the tiny speaker: a short two-note
+    // chirp carries better than the original single 40 ms tone.
+    {1400, 55}, {0, 20}, {2200, 75},
 };
 
 constexpr Melody melody_for(AudioNotifier::Event event) {
