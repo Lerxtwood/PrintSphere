@@ -72,6 +72,8 @@ class Ui {
   bool consume_camera_refresh_request();
   bool consume_chamber_light_toggle_request();
   bool has_chamber_light_toggle_request() const { return chamber_light_toggle_requested_.load(); }
+  bool consume_click_sound_request();
+  bool has_click_sound_request() const { return click_sound_requested_.load(); }
   // Pause / resume / stop buttons on the preview page set this request.
   // Application::loop polls it every iteration and dispatches via the LAN /
   // Cloud client. Returns kNone when no command pending. Consuming clears
@@ -127,6 +129,10 @@ class Ui {
   void compute_portal_texts_locked();
   void set_brightness_percent(int brightness_percent);
   void stop_ring_animations_locked();
+  void trigger_logo_action_locked();
+  bool snapshot_has_active_print_center_cycle(const PrinterSnapshot& snapshot) const;
+  void sync_runtime_center_mode_locked(const PrinterSnapshot& snapshot);
+  void toggle_runtime_center_mode_locked();
   // Build a single AMS-unit page (widgets attached to ams_pages_[page_slot]).
   // page_slot 0 additionally receives the right-side external-spool widgets.
   void build_ams_page(int page_slot);
@@ -347,6 +353,12 @@ class Ui {
   bool status_art_visible_ = false;
   bool logo_recolor_enabled_ = false;
   uint32_t logo_recolor_hex_ = 0;
+  enum class RuntimeCenterMode : uint8_t {
+    kPrintImage,
+    kAmsInfo,
+  };
+  RuntimeCenterMode runtime_center_mode_ = RuntimeCenterMode::kPrintImage;
+  bool runtime_center_mode_initialized_ = false;
   std::string last_status_art_key_;
   StatusIconTheme last_status_art_theme_ = StatusIconTheme::kBasic;
   bool portal_lock_enabled_ = true;
@@ -364,6 +376,7 @@ class Ui {
   mutable std::mutex camera_refresh_mutex_{};
   bool camera_refresh_requested_ = false;
   std::atomic<bool> chamber_light_toggle_requested_{false};
+  std::atomic<bool> click_sound_requested_{false};
   std::atomic<bool> return_to_radar_requested_{false};
   std::atomic<uint8_t> print_command_request_{static_cast<uint8_t>(PrintCommand::kNone)};
   std::atomic<bool> portal_unlock_requested_{false};

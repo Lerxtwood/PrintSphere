@@ -262,7 +262,8 @@ PrintLifecycleState lifecycle_after_print_command(PrintCommand cmd) {
 void wait_for_next_iteration(Ui& ui, TickType_t delay) {
   TickType_t remaining = delay;
   while (remaining > 0) {
-    if (ui.has_chamber_light_toggle_request() || ui.has_print_command_request()) {
+    if (ui.has_chamber_light_toggle_request() || ui.has_click_sound_request() ||
+        ui.has_print_command_request()) {
       break;
     }
     const bool touch_wake_poll_active = ui.screen_power_mode() == ScreenPowerMode::kOff;
@@ -275,7 +276,8 @@ void wait_for_next_iteration(Ui& ui, TickType_t delay) {
     vTaskDelay(slice);
     remaining -= slice;
 
-    if (ui.has_chamber_light_toggle_request() || ui.has_print_command_request()) {
+    if (ui.has_chamber_light_toggle_request() || ui.has_click_sound_request() ||
+        ui.has_print_command_request()) {
       break;
     }
     if (touch_wake_poll_active && gpio_get_level(BSP_LCD_TOUCH_INT) == 0) {
@@ -670,6 +672,10 @@ void Application::run() {
     PrinterSnapshot snapshot = build_merged_snapshot(local_snapshot, cloud_snapshot);
     apply_chamber_light_override(&snapshot);
     apply_print_command_override(&snapshot);
+
+    if (ui_.consume_click_sound_request()) {
+      audio_notifier_.play(AudioNotifier::Event::kClick);
+    }
 
     if (ui_.consume_chamber_light_toggle_request()) {
       const bool requested_on =

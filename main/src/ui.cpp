@@ -1742,6 +1742,11 @@ void Ui::set_status_icon_theme(StatusIconTheme theme) {
 
 void Ui::set_preview_center_mode(PreviewCenterMode mode) {
   preview_center_mode_ = mode;
+  if (!runtime_center_mode_initialized_) {
+    runtime_center_mode_ = mode == PreviewCenterMode::kAmsInfo
+                               ? RuntimeCenterMode::kAmsInfo
+                               : RuntimeCenterMode::kPrintImage;
+  }
 }
 
 esp_err_t Ui::initialize() {
@@ -1852,6 +1857,64 @@ bool Ui::consume_camera_refresh_request() {
 
 bool Ui::consume_chamber_light_toggle_request() {
   return chamber_light_toggle_requested_.exchange(false);
+}
+
+bool Ui::consume_click_sound_request() {
+  return click_sound_requested_.exchange(false);
+}
+
+void Ui::trigger_logo_action_locked() {
+  if (scrolling_ || !show_logo_) {
+    return;
+  }
+
+  note_activity(false);
+  if (snapshot_has_active_print_center_cycle(last_snapshot_)) {
+    click_sound_requested_.store(true);
+    sync_runtime_center_mode_locked(last_snapshot_);
+    toggle_runtime_center_mode_locked();
+    apply_snapshot_locked(last_snapshot_, false);
+    return;
+  }
+  if (!last_snapshot_.chamber_light_supported) {
+    return;
+  }
+  click_sound_requested_.store(true);
+  chamber_light_toggle_requested_.store(true);
+}
+
+bool Ui::snapshot_has_active_print_center_cycle(const PrinterSnapshot& snapshot) const {
+  const bool active_lifecycle =
+      snapshot.lifecycle == PrintLifecycleState::kPrinting ||
+      snapshot.lifecycle == PrintLifecycleState::kPaused;
+  const bool job_started =
+      snapshot.print_active || snapshot.current_layer > 0U || snapshot.progress_percent >= 1.0f;
+  return active_lifecycle && job_started;
+}
+
+void Ui::sync_runtime_center_mode_locked(const PrinterSnapshot& snapshot) {
+  if (!snapshot_has_active_print_center_cycle(snapshot)) {
+    runtime_center_mode_initialized_ = false;
+    return;
+  }
+  if (runtime_center_mode_initialized_) {
+    return;
+  }
+  runtime_center_mode_ = preview_center_mode_ == PreviewCenterMode::kAmsInfo
+                             ? RuntimeCenterMode::kAmsInfo
+                             : RuntimeCenterMode::kPrintImage;
+  runtime_center_mode_initialized_ = true;
+}
+
+void Ui::toggle_runtime_center_mode_locked() {
+  runtime_center_mode_ = runtime_center_mode_ == RuntimeCenterMode::kAmsInfo
+                             ? RuntimeCenterMode::kPrintImage
+                             : RuntimeCenterMode::kAmsInfo;
+
+  if (runtime_center_mode_ == RuntimeCenterMode::kPrintImage &&
+      (!last_snapshot_.preview_blob || last_snapshot_.preview_blob->empty())) {
+    runtime_center_mode_ = RuntimeCenterMode::kAmsInfo;
+  }
 }
 
 PrintCommand Ui::consume_print_command_request() {
@@ -2677,14 +2740,8 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
 
   LvglLockGuard::note_phase("preview_text");
-  const bool preview_job_active =
-      snapshot.print_active || snapshot.lifecycle == PrintLifecycleState::kPreparing ||
-      snapshot.lifecycle == PrintLifecycleState::kPrinting ||
-      snapshot.lifecycle == PrintLifecycleState::kPaused;
-  const bool show_preview_ams_info =
-      preview_center_mode_ == PreviewCenterMode::kAmsInfo && preview_job_active;
-  const PreviewAmsCardInfo ams_card = show_preview_ams_info ? preview_ams_card_info(snapshot)
-                                                            : PreviewAmsCardInfo{};
+  const bool show_preview_ams_info = false;
+  const PreviewAmsCardInfo ams_card{};
   std::string preview_note = preview_note_text(snapshot);
   std::string preview_subnote = preview_subnote_text(snapshot);
   const std::string camera_note = camera_note_text(snapshot);
@@ -2843,17 +2900,17 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
   }
 
   show_logo_ = should_show_logo(snapshot);
+  sync_runtime_center_mode_locked(snapshot);
   StatusArtSpec status_art{};
   const bool use_status_art =
       show_logo_ && should_show_status_art(snapshot, operation_text, &status_art);
-  const bool actively_printing =
-      snapshot.lifecycle == PrintLifecycleState::kPrinting &&
-      (snapshot.current_layer > 0 || snapshot.progress_percent >= 1.0f);
+  const bool center_cycle_active = snapshot_has_active_print_center_cycle(snapshot);
   const bool use_logo_ams_card =
-      actively_printing && !use_status_art &&
-      preview_center_mode_ == PreviewCenterMode::kAmsInfo;
+      center_cycle_active && !use_status_art &&
+      runtime_center_mode_ == RuntimeCenterMode::kAmsInfo;
   const bool use_preview_logo =
-      actively_printing && !use_logo_ams_card && !use_status_art &&
+      center_cycle_active && !use_logo_ams_card && !use_status_art &&
+      runtime_center_mode_ == RuntimeCenterMode::kPrintImage &&
       has_preview_image && last_preview_raw_ &&
       !last_preview_raw_->empty();
   const PreviewAmsCardInfo logo_ams_card =
@@ -3002,10 +3059,10 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
       }
     }
   }
-  const bool chamber_light_clickable = snapshot.chamber_light_supported;
-  if (logo_clickable_ != chamber_light_clickable) {
-    set_clickable(logo_badge_, chamber_light_clickable);
-    logo_clickable_ = chamber_light_clickable;
+  const bool badge_clickable = snapshot.chamber_light_supported || center_cycle_active;
+  if (logo_clickable_ != badge_clickable) {
+    set_clickable(logo_badge_, badge_clickable);
+    logo_clickable_ = badge_clickable;
   }
 
   const bool logo_recolor_enabled =
@@ -3852,7 +3909,7 @@ esp_err_t Ui::build_dashboard() {
   lv_obj_clear_flag(logo_badge_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_clear_flag(logo_badge_, LV_OBJ_FLAG_SCROLLABLE);
   enable_touch_bubble(logo_badge_);
-  lv_obj_add_event_cb(logo_badge_, &Ui::logo_event_cb, LV_EVENT_CLICKED, this);
+  lv_obj_add_event_cb(logo_badge_, &Ui::logo_event_cb, LV_EVENT_PRESSED, this);
 
   logo_image_ = lv_image_create(logo_badge_);
   lv_image_set_src(logo_image_, &bambuicon_small);
@@ -4877,16 +4934,10 @@ void Ui::update_portal_access_visuals_locked() {
 }
 
 void Ui::handle_logo_event(lv_event_t* event) {
-  if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+  if (lv_event_get_code(event) != LV_EVENT_PRESSED) {
     return;
   }
-
-  if (scrolling_ || !show_logo_ || !last_snapshot_.chamber_light_supported) {
-    return;
-  }
-
-  note_activity(false);
-  chamber_light_toggle_requested_.store(true);
+  trigger_logo_action_locked();
 }
 
 void Ui::handle_pause_button_event(lv_event_t* event) {
