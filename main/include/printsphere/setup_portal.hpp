@@ -67,6 +67,7 @@ class SetupPortal {
   static esp_err_t handle_portal_access_post(httpd_req_t* request);
   static esp_err_t handle_ams_display_post(httpd_req_t* request);
   static esp_err_t handle_audio_post(httpd_req_t* request);
+  static esp_err_t handle_quiet_hours_post(httpd_req_t* request);
   static esp_err_t handle_audio_event_post(httpd_req_t* request);
   static esp_err_t handle_audio_upload(httpd_req_t* request);
   static esp_err_t handle_audio_clear(httpd_req_t* request);

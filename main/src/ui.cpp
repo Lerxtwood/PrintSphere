@@ -4779,6 +4779,7 @@ void Ui::handle_screen_event(lv_event_t* event) {
     set_pager_scroll_locked(false);
     if (screen_power_mode_ == ScreenPowerMode::kOff) {
       // First touch wakes the screen; a second touch performs UI actions.
+      arm_quiet_hours_touch_wake(lv_tick_get());
       note_activity(true);
       gesture_active_ = false;
       swipe_switched_ = false;
@@ -5030,6 +5031,18 @@ void Ui::note_activity(bool wake_display_now) {
   }
 }
 
+namespace {
+constexpr uint32_t kQuietHoursTouchWakeMs = 30000U;
+bool quiet_hours_screen_off_active_now(const QuietHoursConfig& config);
+}  // namespace
+
+void Ui::arm_quiet_hours_touch_wake(uint32_t now_tick_ms) {
+  if (!quiet_hours_screen_off_active_now(quiet_hours_config_)) {
+    return;
+  }
+  quiet_hours_touch_wake_until_ms_.store(now_tick_ms + kQuietHoursTouchWakeMs);
+}
+
 void Ui::wake_display() {
   if (screen_power_mode_ == ScreenPowerMode::kAwake) {
     return;
@@ -5044,12 +5057,44 @@ void Ui::wake_display() {
 }
 
 void Ui::request_wake_display() {
+  arm_quiet_hours_touch_wake(lv_tick_get());
   note_activity(true);
 }
 
 void Ui::set_battery_display_policy(const BatteryDisplayPolicy& policy) {
   battery_display_policy_ = policy;
 }
+
+void Ui::set_quiet_hours_config(const QuietHoursConfig& config) {
+  quiet_hours_config_ = config;
+  if (!quiet_hours_screen_off_active_now(quiet_hours_config_)) {
+    quiet_hours_touch_wake_until_ms_.store(0);
+  }
+}
+
+namespace {
+bool quiet_hours_screen_off_active_now(const QuietHoursConfig& config) {
+  if (!config.enabled || !config.screen_off || config.start_minute == config.end_minute) {
+    return false;
+  }
+
+  const std::time_t now = std::time(nullptr);
+  if (now <= 0) {
+    return false;
+  }
+
+  std::tm local = {};
+  if (localtime_r(&now, &local) == nullptr) {
+    return false;
+  }
+
+  const int now_minute = local.tm_hour * 60 + local.tm_min;
+  if (config.start_minute < config.end_minute) {
+    return now_minute >= config.start_minute && now_minute < config.end_minute;
+  }
+  return now_minute >= config.start_minute || now_minute < config.end_minute;
+}
+}  // namespace
 
 void Ui::apply_brightness_policy() {
   int target_brightness = user_brightness_percent_;
@@ -5074,12 +5119,18 @@ void Ui::apply_brightness_policy() {
 void Ui::update_power_save(bool on_battery, bool keep_awake) {
   const uint32_t now = lv_tick_get();
   const uint32_t idle_ms = now - last_activity_tick_ms_.load();
+  const bool quiet_screen_off = quiet_hours_screen_off_active_now(quiet_hours_config_);
+  const uint32_t quiet_touch_wake_until = quiet_hours_touch_wake_until_ms_.load();
+  const bool quiet_touch_wake_active =
+      quiet_screen_off && quiet_touch_wake_until != 0 &&
+      static_cast<int32_t>(quiet_touch_wake_until - now) > 0;
 
   // While the LVGL worker is paused (screen off), LVGL touch events are not
   // processed.  Poll the raw touch-interrupt GPIO so a finger press can still
   // wake the display.  CST9217 pulls INT (GPIO 11) low on contact.
   if (screen_power_mode_ == ScreenPowerMode::kOff &&
       gpio_get_level(BSP_LCD_TOUCH_INT) == 0) {
+    arm_quiet_hours_touch_wake(now);
     note_activity(true);  // updates last_activity_tick_ms_ + calls wake_display()
     return;               // re-evaluate on next call with fresh idle_ms
   }
@@ -5092,7 +5143,9 @@ void Ui::update_power_save(bool on_battery, bool keep_awake) {
       : battery_display_policy_.off_timeout_idle_s) * 1000U;
 
   ScreenPowerMode target_mode = ScreenPowerMode::kAwake;
-  if (!keep_awake && (on_battery || battery_display_policy_.usb_power_save_enabled)) {
+  if (quiet_screen_off && !quiet_touch_wake_active) {
+    target_mode = ScreenPowerMode::kOff;
+  } else if (!keep_awake && (on_battery || battery_display_policy_.usb_power_save_enabled)) {
     if (battery_display_policy_.screen_off_enabled && idle_ms >= off_timeout) {
       target_mode = ScreenPowerMode::kOff;
     } else if (battery_display_policy_.dim_enabled && idle_ms >= dim_timeout) {

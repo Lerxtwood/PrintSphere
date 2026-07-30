@@ -46,6 +46,7 @@ class Ui {
   void apply_snapshot(const PrinterSnapshot& snapshot);
   void update_power_save(bool on_battery, bool keep_awake);
   void set_battery_display_policy(const BatteryDisplayPolicy& policy);
+  void set_quiet_hours_config(const QuietHoursConfig& config);
   bool is_low_power_mode_active() const;
   ScreenPowerMode screen_power_mode() const { return screen_power_mode_; }
   bool is_config_page_active() const {
@@ -113,6 +114,7 @@ class Ui {
   void update_page_availability_locked(const PrinterSnapshot& snapshot);
   void note_activity(bool wake_display);
   void wake_display();
+  void arm_quiet_hours_touch_wake(uint32_t now_tick_ms);
   void apply_brightness_policy();
   void set_pager_scroll_locked(bool locked);
   void set_active_page(int page);
@@ -333,6 +335,7 @@ class Ui {
   uint64_t layer_progress_started_ms_ = 0;
   uint32_t layer_progress_observed_duration_s_ = 0;
   std::atomic<uint32_t> last_activity_tick_ms_{0};
+  std::atomic<uint32_t> quiet_hours_touch_wake_until_ms_{0};
   ScreenPowerMode screen_power_mode_ = ScreenPowerMode::kAwake;
   std::string last_ui_status_;
   bool last_print_active_ = false;
@@ -384,6 +387,7 @@ class Ui {
   PrinterSnapshot last_snapshot_{};
   DisplayRotation display_rotation_ = DisplayRotation::k0;
   BatteryDisplayPolicy battery_display_policy_{};
+  QuietHoursConfig quiet_hours_config_{};
 };
 
 }  // namespace printsphere

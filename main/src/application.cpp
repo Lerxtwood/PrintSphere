@@ -376,7 +376,9 @@ void Application::run() {
   audio_notifier_.set_volume_percent(config_store_.load_audio_volume_percent());
   {
     const QuietHoursConfig quiet = config_store_.load_quiet_hours();
-    audio_notifier_.set_quiet_hours(quiet.enabled, quiet.start_minute, quiet.end_minute);
+    audio_notifier_.set_quiet_hours(quiet.enabled && quiet.mute_audio,
+                                    quiet.start_minute, quiet.end_minute);
+    ui_.set_quiet_hours_config(quiet);
   }
 
   // Mount the LittleFS partition that holds custom sound files.

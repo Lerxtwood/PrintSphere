@@ -360,6 +360,8 @@ QuietHoursConfig ConfigStore::load_quiet_hours() const {
 
   config.start_minute = load_minute("quiet_start", config.start_minute);
   config.end_minute = load_minute("quiet_end", config.end_minute);
+  config.mute_audio = parse_bool_or_default(load_string("quiet_audio"), config.mute_audio);
+  config.screen_off = parse_bool_or_default(load_string("quiet_screen"), config.screen_off);
   return config;
 }
 
@@ -486,7 +488,11 @@ esp_err_t ConfigStore::save_quiet_hours(const QuietHoursConfig& config) const {
                       "save quiet enabled failed");
   ESP_RETURN_ON_ERROR(save_string("quiet_start", std::to_string(start)), kTag,
                       "save quiet start failed");
-  return save_string("quiet_end", std::to_string(end));
+  ESP_RETURN_ON_ERROR(save_string("quiet_end", std::to_string(end)), kTag,
+                      "save quiet end failed");
+  ESP_RETURN_ON_ERROR(save_string("quiet_audio", config.mute_audio ? "1" : "0"), kTag,
+                      "save quiet audio failed");
+  return save_string("quiet_screen", config.screen_off ? "1" : "0");
 }
 
 std::string ConfigStore::load_timezone_iana() const {

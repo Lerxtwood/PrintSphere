@@ -1261,6 +1261,14 @@ esp_err_t SetupPortal::start() {
   ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &audio_uri), kTag,
                       "audio handler failed");
 
+  httpd_uri_t quiet_hours_uri = {};
+  quiet_hours_uri.uri = "/api/quiet-hours";
+  quiet_hours_uri.method = HTTP_POST;
+  quiet_hours_uri.handler = &SetupPortal::handle_quiet_hours_post;
+  quiet_hours_uri.user_ctx = this;
+  ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server_, &quiet_hours_uri), kTag,
+                      "quiet-hours handler failed");
+
   httpd_uri_t audio_event_uri = {};
   audio_event_uri.uri = "/api/audio/event";
   audio_event_uri.method = HTTP_POST;
@@ -1706,6 +1714,9 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += ".grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:14px;}"
           ".grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;}"
           ".field{display:grid;gap:8px;} .actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;}"
+          ".checkbox{display:flex;align-items:flex-start;gap:10px;margin:0;font-size:14px;font-weight:600;color:#d5e1ed;}"
+          ".checkbox input[type=checkbox]{width:auto;min-width:16px;max-width:16px;height:16px;min-height:16px;"
+          "margin:2px 0 0;flex:0 0 16px;padding:0;border-radius:4px;accent-color:#4d86c7;}"
           ".actions .micro{min-width:220px;} .color-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;}"
           ".color-grid input{min-height:54px;padding:6px 10px;background:#0c131b;}"
           "input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:6px;background:#1e3347;"
@@ -2162,25 +2173,6 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
       html += "<input type=\"range\" id=\"audio_volume\" min=\"0\" max=\"100\" step=\"1\" value=\"";
       html += std::to_string(audio_volume_cfg);
       html += "\" oninput=\"document.getElementById('audio_volume_value').textContent=this.value+'%';\"></div>";
-      html += "<div class=\"field\"><label for=\"quiet_enabled\">Quiet Hours</label><select id=\"quiet_enabled\">";
-      html += "<option value=\"true\"";
-      if (quiet_cfg.enabled) {
-        html += " selected";
-      }
-      html += ">Enabled</option>";
-      html += "<option value=\"false\"";
-      if (!quiet_cfg.enabled) {
-        html += " selected";
-      }
-      html += ">Disabled</option></select>";
-      html += "<div class=\"micro\">Mutes normal notification sounds during local quiet hours. Test sounds still play.</div></div>";
-      html += "<div class=\"grid-2\"><div class=\"field\"><label for=\"quiet_start\">Quiet starts</label>";
-      html += "<input type=\"time\" id=\"quiet_start\" value=\"";
-      html += minute_to_time_input(quiet_cfg.start_minute);
-      html += "\"></div><div class=\"field\"><label for=\"quiet_end\">Sound resumes</label>";
-      html += "<input type=\"time\" id=\"quiet_end\" value=\"";
-      html += minute_to_time_input(quiet_cfg.end_minute);
-      html += "\"></div></div>";
       html += "<div class=\"actions\"><button type=\"button\" class=\"primary\" id=\"audio-apply-button\">Save</button>";
       html += "<button type=\"button\" id=\"audio-test-button\">Test sound</button>";
       html += "<div class=\"micro\" id=\"audio-apply-hint\">Applies live, no restart required.</div></div>";
@@ -2248,6 +2240,59 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
       html += "<div class=\"micro\" style=\"margin-top:6px;\">WAV: 16 kHz, 16-bit, mono, max 10 s. "
               "Custom sounds replace built-in tones for that event.</div>";
 
+      end_settings_panel();
+    }
+
+    {
+      std::string quiet_badge_value = quiet_cfg.enabled ? "On" : "Off";
+      if (quiet_cfg.enabled) {
+        if (quiet_cfg.mute_audio && quiet_cfg.screen_off) {
+          quiet_badge_value = "Audio + Screen";
+        } else if (quiet_cfg.mute_audio) {
+          quiet_badge_value = "Audio";
+        } else if (quiet_cfg.screen_off) {
+          quiet_badge_value = "Screen";
+        } else {
+          quiet_badge_value = "Window Only";
+        }
+      }
+      const char* quiet_badge_class = quiet_cfg.enabled ? "info" : "idle";
+      begin_settings_panel(
+          "Quiet Hours",
+          "Set a local-time window and choose which device behaviors should pause during it.",
+          quiet_badge_value, quiet_badge_class, false);
+      html += "<div class=\"field\"><label for=\"quiet_enabled\">Quiet Hours</label><select id=\"quiet_enabled\">";
+      html += "<option value=\"true\"";
+      if (quiet_cfg.enabled) {
+        html += " selected";
+      }
+      html += ">Enabled</option>";
+      html += "<option value=\"false\"";
+      if (!quiet_cfg.enabled) {
+        html += " selected";
+      }
+      html += ">Disabled</option></select>";
+      html += "<div class=\"micro\">Applies using the device's configured local time zone.</div></div>";
+      html += "<div class=\"grid-2\"><div class=\"field\"><label for=\"quiet_start\">Quiet starts</label>";
+      html += "<input type=\"time\" id=\"quiet_start\" value=\"";
+      html += minute_to_time_input(quiet_cfg.start_minute);
+      html += "\"></div><div class=\"field\"><label for=\"quiet_end\">Quiet ends</label>";
+      html += "<input type=\"time\" id=\"quiet_end\" value=\"";
+      html += minute_to_time_input(quiet_cfg.end_minute);
+      html += "\"></div></div>";
+      html += "<label class=\"checkbox\"><input type=\"checkbox\" id=\"quiet_mute_audio\"";
+      if (quiet_cfg.mute_audio) {
+        html += " checked";
+      }
+      html += ">Mute notification sounds during quiet hours</label>";
+      html += "<label class=\"checkbox\"><input type=\"checkbox\" id=\"quiet_screen_off\"";
+      if (quiet_cfg.screen_off) {
+        html += " checked";
+      }
+      html += ">Turn the screen off during quiet hours</label>";
+      html += "<div class=\"micro\">Sound tests still play even when quiet-hours audio muting is enabled.</div>";
+      html += "<div class=\"actions\"><button type=\"button\" class=\"primary\" id=\"quiet-apply-button\">Save</button>";
+      html += "<div class=\"micro\" id=\"quiet-apply-hint\">Applies live, no restart required.</div></div>";
       end_settings_panel();
     }
 
@@ -2666,7 +2711,10 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
   html += minute_to_time_input(quiet_cfg.start_minute);
   html += "\",quiet_end:\"";
   html += minute_to_time_input(quiet_cfg.end_minute);
-  html += "\"";
+  html += "\",quiet_mute_audio:";
+  html += quiet_cfg.mute_audio ? "true" : "false";
+  html += ",quiet_screen_off:";
+  html += quiet_cfg.screen_off ? "true" : "false";
   html += ",tz_iana:\"";
   html += json_escape(portal->config_store_.load_timezone_iana());
   html += "\"";
@@ -2972,27 +3020,25 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "const tzApply=document.getElementById('tz-apply-button');"
           "const tzHint=document.getElementById('tz-detected-hint');"
           "let tzBrowser='';try{tzBrowser=Intl.DateTimeFormat().resolvedOptions().timeZone||'';}catch(e){}"
+          "function tzBrowserSupported(){if(!tzBrowser||!tzSelect)return false;for(const o of tzSelect.options){if(o.value===tzBrowser)return true;}return false;}"
           "function tzInitialPick(){if(!tzSelect)return '';const saved=savedConfig.tz_iana||'';if(saved)return saved;"
           "if(tzBrowser){for(const o of tzSelect.options){if(o.value===tzBrowser)return tzBrowser;}}return '';}"
           "function tzUpdateControls(){if(!tzSelect||!tzApply)return;const cur=tzSelect.value;const saved=savedConfig.tz_iana||'';"
           "if(cur!==saved){tzApply.classList.remove('hidden');tzApply.disabled=false;}else{tzApply.classList.add('hidden');}}"
           "if(tzSelect){const pick=tzInitialPick();if(pick&&!savedConfig.tz_iana){tzSelect.value=pick;}"
-          "if(tzHint){if(tzBrowser){tzHint.textContent='Browser detected: '+tzBrowser+(savedConfig.tz_iana?'':' (pre-selected)');}else{tzHint.textContent='Browser timezone could not be detected.';}}"
+          "if(tzHint){if(tzBrowser){tzHint.textContent='Browser detected: '+tzBrowser+(savedConfig.tz_iana?'':' (pre-selected)')+(tzBrowserSupported()?'':' (unsupported)');}else{tzHint.textContent='Browser timezone could not be detected.';}}"
           "tzSelect.addEventListener('change',tzUpdateControls);tzUpdateControls();}"
-          "if(tzApply){tzApply.addEventListener('click',async()=>{const tz_iana=tzSelect?tzSelect.value:'';"
+          "if(tzApply){tzApply.addEventListener('click',async()=>{const tz_iana=tzSelect?tzSelect.value:'';const tz_browser=(!tz_iana&&tzBrowserSupported())?tzBrowser:'';"
           "tzApply.disabled=true;setStatus('Applying time zone...','Saving and switching local time now (no reboot).',8000);"
-          "try{const response=await fetch('/api/timezone',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tz_iana})});"
+          "try{const response=await fetch('/api/timezone',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tz_iana,tz_browser})});"
           "const body=await response.json().catch(()=>({}));"
-          "if(response.ok){savedConfig.tz_iana=tz_iana;tzUpdateControls();setStatus('Time zone saved.','Local time is now '+(tz_iana||'UTC')+'.',4000);}"
+          "if(response.ok){const appliedTz=body.tz_iana||tz_iana||tz_browser||'';savedConfig.tz_iana=appliedTz;tzUpdateControls();setStatus('Time zone saved.','Local time is now '+(appliedTz||'UTC')+'.',4000);}"
           "else{setStatus(body.error||'Time zone change failed','The new time zone could not be saved.',6000);tzApply.disabled=false;tzUpdateControls();}}"
           "catch(error){setStatus('Time zone change failed','The request to the ESP could not be completed.',6000);tzApply.disabled=false;tzUpdateControls();}});}}";
   // Sound notifications panel: enable/volume save + live test button. Applies
   // without restart so the button feedback is immediate.
   html += "{const audioEnabledSel=document.getElementById('audio_enabled');"
           "const audioVolumeRange=document.getElementById('audio_volume');"
-          "const quietEnabledSel=document.getElementById('quiet_enabled');"
-          "const quietStartInput=document.getElementById('quiet_start');"
-          "const quietEndInput=document.getElementById('quiet_end');"
           "const audioApply=document.getElementById('audio-apply-button');"
           "const audioTest=document.getElementById('audio-test-button');"
           "async function audioPost(payload){const response=await fetch('/api/audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
@@ -3000,24 +3046,38 @@ esp_err_t SetupPortal::handle_root(httpd_req_t* request) {
           "if(audioApply){audioApply.addEventListener('click',async()=>{"
               "const audio_enabled=audioEnabledSel?audioEnabledSel.value==='true':true;"
               "const audio_volume=audioVolumeRange?Number(audioVolumeRange.value):60;"
-              "const quiet_enabled=quietEnabledSel?quietEnabledSel.value==='true':savedConfig.quiet_enabled!==false;"
-              "const quiet_start=quietStartInput?quietStartInput.value:(savedConfig.quiet_start||'21:00');"
-              "const quiet_end=quietEndInput?quietEndInput.value:(savedConfig.quiet_end||'08:00');"
               "audioApply.disabled=true;setStatus('Saving sound...','Applying notification sound settings.',4000);"
-              "const r=await audioPost({audio_enabled,audio_volume,quiet_enabled,quiet_start,quiet_end,test:false}).catch(()=>({ok:false,body:{}}));"
-              "if(r.ok){savedConfig.audio_enabled=audio_enabled;savedConfig.audio_volume=audio_volume;"
-              "savedConfig.quiet_enabled=quiet_enabled;savedConfig.quiet_start=quiet_start;savedConfig.quiet_end=quiet_end;setStatus('Sound saved.','',2500);}"
+              "const r=await audioPost({audio_enabled,audio_volume,test:false}).catch(()=>({ok:false,body:{}}));"
+              "if(r.ok){savedConfig.audio_enabled=audio_enabled;savedConfig.audio_volume=audio_volume;setStatus('Sound saved.','',2500);}"
               "else{setStatus(r.body.error||'Sound change failed','Sound settings could not be saved.',6000);}"
               "audioApply.disabled=false;});}"
           "if(audioTest){audioTest.addEventListener('click',async()=>{"
               "const audio_enabled=audioEnabledSel?audioEnabledSel.value==='true':true;"
               "const audio_volume=audioVolumeRange?Number(audioVolumeRange.value):60;"
+              "audioTest.disabled=true;"
+              "await audioPost({audio_enabled,audio_volume,test:true}).catch(()=>{});"
+              "setTimeout(()=>{audioTest.disabled=false;},900);});}}";
+  html += "{const quietEnabledSel=document.getElementById('quiet_enabled');"
+          "const quietStartInput=document.getElementById('quiet_start');"
+          "const quietEndInput=document.getElementById('quiet_end');"
+          "const quietMuteAudio=document.getElementById('quiet_mute_audio');"
+          "const quietScreenOff=document.getElementById('quiet_screen_off');"
+          "const quietApply=document.getElementById('quiet-apply-button');"
+          "async function quietPost(payload){const response=await fetch('/api/quiet-hours',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
+              "const body=await response.json().catch(()=>({}));return{ok:response.ok,body};}"
+          "if(quietApply){quietApply.addEventListener('click',async()=>{"
               "const quiet_enabled=quietEnabledSel?quietEnabledSel.value==='true':savedConfig.quiet_enabled!==false;"
               "const quiet_start=quietStartInput?quietStartInput.value:(savedConfig.quiet_start||'21:00');"
               "const quiet_end=quietEndInput?quietEndInput.value:(savedConfig.quiet_end||'08:00');"
-              "audioTest.disabled=true;"
-              "await audioPost({audio_enabled,audio_volume,quiet_enabled,quiet_start,quiet_end,test:true}).catch(()=>{});"
-              "setTimeout(()=>{audioTest.disabled=false;},900);});}}";
+              "const quiet_mute_audio=quietMuteAudio?quietMuteAudio.checked:(savedConfig.quiet_mute_audio!==false);"
+              "const quiet_screen_off=quietScreenOff?quietScreenOff.checked:(savedConfig.quiet_screen_off===true);"
+              "quietApply.disabled=true;setStatus('Saving quiet hours...','Applying quiet-hours behavior now.',4000);"
+              "const r=await quietPost({quiet_enabled,quiet_start,quiet_end,quiet_mute_audio,quiet_screen_off}).catch(()=>({ok:false,body:{}}));"
+              "if(r.ok){savedConfig.quiet_enabled=quiet_enabled;savedConfig.quiet_start=quiet_start;"
+              "savedConfig.quiet_end=quiet_end;savedConfig.quiet_mute_audio=quiet_mute_audio;"
+              "savedConfig.quiet_screen_off=quiet_screen_off;setStatus('Quiet hours saved.','',2500);}"
+              "else{setStatus(r.body.error||'Quiet-hours change failed','Quiet-hours settings could not be saved.',6000);}"
+              "quietApply.disabled=false;});}}";
   // Per-event audio customization JS
   html += "{const kEvCnt=8;"
           "async function setEvEnabled(idx,en){"
@@ -3691,6 +3751,10 @@ esp_err_t SetupPortal::handle_config_get(httpd_req_t* request) {
   body += quiet_get.enabled ? "true" : "false";
   body += ",\"quiet_start\":\"" + minute_to_time_input(quiet_get.start_minute) + "\"";
   body += ",\"quiet_end\":\"" + minute_to_time_input(quiet_get.end_minute) + "\"";
+  body += ",\"quiet_mute_audio\":";
+  body += quiet_get.mute_audio ? "true" : "false";
+  body += ",\"quiet_screen_off\":";
+  body += quiet_get.screen_off ? "true" : "false";
   body += ",\"tz_iana\":\"" + json_escape(portal->config_store_.load_timezone_iana()) + "\"";
   body += "}";
 
@@ -4113,7 +4177,12 @@ esp_err_t SetupPortal::handle_timezone_post(httpd_req_t* request) {
     return parse_err;
   }
   std::string tz_iana = trim_copy(read_string_field(root, "tz_iana"));
+  const std::string tz_browser = trim_copy(read_string_field(root, "tz_browser"));
   cJSON_Delete(root);
+
+  if (tz_iana.empty() && !tz_browser.empty()) {
+    tz_iana = tz_browser;
+  }
 
   // Validate against the curated list. Empty value is allowed (clears to UTC).
   if (!tz_iana.empty() && time_sync::iana_to_posix(tz_iana).empty()) {
@@ -4126,7 +4195,10 @@ esp_err_t SetupPortal::handle_timezone_post(httpd_req_t* request) {
   // Apply immediately — no reboot required for localtime_r() consumers.
   time_sync::set_timezone_iana(tz_iana);
 
-  send_json(request, "{\"status\":\"saved\"}");
+  std::string body = "{\"status\":\"saved\",\"tz_iana\":\"";
+  body += json_escape(tz_iana);
+  body += "\"}";
+  send_json(request, body);
   return ESP_OK;
 }
 
@@ -4157,8 +4229,60 @@ esp_err_t SetupPortal::handle_audio_post(httpd_req_t* request) {
       }
     }
   }
+  const bool play_test = read_bool_field(root, "test", false);
+  int test_event_idx = -1;
+  {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, "test_event");
+    if (cJSON_IsNumber(item)) {
+      const long v = static_cast<long>(item->valuedouble);
+      if (v >= 0 && v < static_cast<long>(AudioNotifier::kEventCount)) {
+        test_event_idx = static_cast<int>(v);
+      }
+    }
+  }
+  cJSON_Delete(root);
+
+  ESP_LOGI(kTag, "Saving audio: enabled=%d volume=%d test=%d",
+           audio_enabled, audio_volume, play_test);
+  ESP_RETURN_ON_ERROR(portal->config_store_.save_audio_enabled(audio_enabled), kTag,
+                      "save audio enabled failed");
+  ESP_RETURN_ON_ERROR(portal->config_store_.save_audio_volume_percent(audio_volume), kTag,
+                      "save audio volume failed");
+
+  // Apply live without reboot — runtime-tunable.
+  portal->audio_notifier_.set_enabled(audio_enabled);
+  portal->audio_notifier_.set_volume_percent(audio_volume);
+  if (play_test) {
+    portal->audio_notifier_.play_test();
+  }
+  if (test_event_idx >= 0) {
+    portal->audio_notifier_.play_test_event(
+        static_cast<AudioNotifier::Event>(test_event_idx));
+  }
+
+  send_json(request, "{\"status\":\"saved\"}");
+  return ESP_OK;
+}
+
+esp_err_t SetupPortal::handle_quiet_hours_post(httpd_req_t* request) {
+  auto* portal = static_cast<SetupPortal*>(request->user_ctx);
+  if (portal == nullptr) {
+    return ESP_FAIL;
+  }
+  if (!portal->is_request_authorized(request)) {
+    return portal->send_locked_response(request);
+  }
+
+  cJSON* root = nullptr;
+  esp_err_t parse_err = receive_json_body(request, &root);
+  if (parse_err != ESP_OK) {
+    return parse_err;
+  }
+
   QuietHoursConfig quiet = portal->config_store_.load_quiet_hours();
   quiet.enabled = read_bool_field(root, "quiet_enabled", quiet.enabled);
+  quiet.mute_audio = read_bool_field(root, "quiet_mute_audio", quiet.mute_audio);
+  quiet.screen_off = read_bool_field(root, "quiet_screen_off", quiet.screen_off);
   {
     const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, "quiet_start");
     if (cJSON_IsString(item) && item->valuestring != nullptr) {
@@ -4181,39 +4305,17 @@ esp_err_t SetupPortal::handle_audio_post(httpd_req_t* request) {
       quiet.end_minute = parsed;
     }
   }
-  const bool play_test = read_bool_field(root, "test", false);
-  int test_event_idx = -1;
-  {
-    const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, "test_event");
-    if (cJSON_IsNumber(item)) {
-      const long v = static_cast<long>(item->valuedouble);
-      if (v >= 0 && v < static_cast<long>(AudioNotifier::kEventCount)) {
-        test_event_idx = static_cast<int>(v);
-      }
-    }
-  }
   cJSON_Delete(root);
 
-  ESP_LOGI(kTag, "Saving audio: enabled=%d volume=%d test=%d",
-           audio_enabled, audio_volume, play_test);
-  ESP_RETURN_ON_ERROR(portal->config_store_.save_audio_enabled(audio_enabled), kTag,
-                      "save audio enabled failed");
-  ESP_RETURN_ON_ERROR(portal->config_store_.save_audio_volume_percent(audio_volume), kTag,
-                      "save audio volume failed");
+  ESP_LOGI(kTag, "Saving quiet hours: enabled=%d mute_audio=%d screen_off=%d start=%u end=%u",
+           quiet.enabled, quiet.mute_audio, quiet.screen_off,
+           static_cast<unsigned>(quiet.start_minute), static_cast<unsigned>(quiet.end_minute));
   ESP_RETURN_ON_ERROR(portal->config_store_.save_quiet_hours(quiet), kTag,
                       "save quiet hours failed");
 
-  // Apply live without reboot — runtime-tunable.
-  portal->audio_notifier_.set_enabled(audio_enabled);
-  portal->audio_notifier_.set_volume_percent(audio_volume);
-  portal->audio_notifier_.set_quiet_hours(quiet.enabled, quiet.start_minute, quiet.end_minute);
-  if (play_test) {
-    portal->audio_notifier_.play_test();
-  }
-  if (test_event_idx >= 0) {
-    portal->audio_notifier_.play_test_event(
-        static_cast<AudioNotifier::Event>(test_event_idx));
-  }
+  portal->audio_notifier_.set_quiet_hours(quiet.enabled && quiet.mute_audio,
+                                          quiet.start_minute, quiet.end_minute);
+  portal->ui_.set_quiet_hours_config(quiet);
 
   send_json(request, "{\"status\":\"saved\"}");
   return ESP_OK;

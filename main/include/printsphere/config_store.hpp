@@ -132,6 +132,8 @@ struct QuietHoursConfig {
   bool enabled = true;
   uint16_t start_minute = 21U * 60U;
   uint16_t end_minute = 8U * 60U;
+  bool mute_audio = true;
+  bool screen_off = false;
 };
 
 class ConfigStore {
